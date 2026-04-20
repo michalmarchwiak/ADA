@@ -1,0 +1,795 @@
+---
+title: "Analiza Danych Ankietowych -- Sprawozdanie 1"
+author: "Michał Marchwiak 276003 Weronika Mitulska 277475"
+date: "today"
+lang: pl
+format:
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    geometry: margin=2.5cm
+    fontsize: 11pt
+    pdf-engine: lualatex
+    include-in-header:
+      text: |
+        \usepackage{float}
+        \floatplacement{figure}{H}
+        \usepackage{booktabs}
+        \usepackage{longtable}
+        \usepackage{caption}
+        \usepackage{fontspec}
+        \setmainfont{Latin Modern Roman}
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(scales)
+library(gridExtra)
+library(binom)
+
+options(knitr.kable.NA = "--")
+knitr::opts_chunk$set(fig.pos = "H")
+
+# Helper: zwraca surowy LaTeX tabeli bez żadnych floatów.
+# Używa \captionof zamiast caption= żeby uniknąć konfliktu KOMA-script w minipage.
+kable_raw <- function(df, caption_txt) {
+    tab_latex <- as.character(
+        kable(df,
+            booktabs = TRUE,
+            linesep  = "",
+            escape   = TRUE,
+            format   = "latex"
+        )
+    )
+    paste0("\\captionof{table}{", caption_txt, "}\n", tab_latex)
+}
+
+# Helper: usuwa float table z surowego LaTeX kable (niezbędne przed minipage)
+strip_float <- function(x) {
+    x <- gsub("\\\\begin\\{table\\}[^\n]*\n", "", x)
+    x <- gsub("\\\\end\\{table\\}", "", x)
+    x <- gsub("\\\\begin\\{center\\}", "", x)
+    x <- gsub("\\\\end\\{center\\}", "", x)
+    x
+}
+
+# Helper: drukuje dwie tabele obok siebie w minipage
+side_by_side <- function(k1_raw, k2_raw, width = "0.48") {
+    cat("\\vspace{4pt}\n\\noindent\n")
+    cat(paste0("\\begin{minipage}[t]{", width, "\\textwidth}\n"))
+    cat(strip_float(k1_raw))
+    cat(paste0("\n\\end{minipage}\\hfill\n"))
+    cat(paste0("\\begin{minipage}[t]{", width, "\\textwidth}\n"))
+    cat(strip_float(k2_raw))
+    cat("\n\\end{minipage}\n\\vspace{4pt}\n")
+}
+```
+
+```{r mosaic-function, include=FALSE}
+mosaic_plot <- function(df, var_x, var_y, title = "") {
+    tab <- table(df[[var_y]], df[[var_x]])
+    prop_col <- prop.table(tab, margin = 2)
+    n_x <- colSums(tab)
+    total <- sum(n_x)
+    width <- n_x / total
+    xmax_vals <- cumsum(width)
+    xmin_vals <- c(0, head(xmax_vals, -1))
+
+    df_rect <- map_dfr(seq_along(colnames(tab)), function(i) {
+        ymax_vals <- cumsum(prop_col[, i])
+        ymin_vals <- c(0, head(ymax_vals, -1))
+        tibble(
+            x_label = colnames(tab)[i],
+            y_label = rownames(tab),
+            xmin    = xmin_vals[i] + 0.005,
+            xmax    = xmax_vals[i] - 0.005,
+            ymin    = ymin_vals,
+            ymax    = ymax_vals,
+            n       = as.integer(tab[, i]),
+            pct     = round(prop_col[, i] * 100, 1)
+        )
+    })
+
+    x_labels <- tibble(
+        x     = (xmin_vals + xmax_vals) / 2,
+        label = paste0(colnames(tab), "\n(n=", n_x, ")")
+    )
+
+    n_levels <- nrow(prop_col)
+    pal <- colorRampPalette(c("#d73027", "#fc8d59", "#fee090", "#91bfdb", "#4575b4"))(n_levels)
+
+    ggplot(df_rect) +
+        geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = y_label),
+            color = "white", linewidth = 0.4
+        ) +
+        geom_text(
+            aes(
+                x = (xmin + xmax) / 2, y = (ymin + ymax) / 2,
+                label = ifelse(pct >= 6, paste0(pct, "%"), "")
+            ),
+            size = 2.8, color = "white", fontface = "bold"
+        ) +
+        scale_x_continuous(breaks = x_labels$x, labels = x_labels$label, expand = c(0, 0)) +
+        scale_y_continuous(labels = label_percent(), expand = c(0, 0)) +
+        scale_fill_manual(values = pal) +
+        labs(title = title, x = NULL, y = "Odsetek", fill = NULL) +
+        theme_minimal(base_size = 10) +
+        theme(
+            plot.title      = element_text(hjust = 0.5, face = "bold"),
+            legend.position = "bottom",
+            panel.grid      = element_blank(),
+            axis.text.x     = element_text(size = 8)
+        )
+}
+```
+
+\newpage
+
+# Wstęp
+
+Celem niniejszego sprawozdania jest kompleksowa analiza wyników ankiety pracowniczej dotyczącej oceny programów szkoleniowych realizowanych przez firmę. Badanie zostało przeprowadzone wśród pracowników z różnych działów i szczebli organizacyjnych, co umożliwia wielowymiarową ocenę skuteczności polityki szkoleniowej.
+
+Raport podzielono na trzy główne części. **Część I** obejmuje analizę opisową -- charakterystykę demograficzną i organizacyjną próby badawczej oraz rozkłady odpowiedzi na pytania ankietowe. **Część II** (nieuwzględniona w niniejszym sprawozdaniu) dotyczyłaby estymacji przedziałowej wskaźników zadowolenia z wykorzystaniem przedziałów ufności Cloppera-Pearsona. **Część III** poświęcona byłaby weryfikacji hipotez statystycznych dotyczących m.in. równości szans i skuteczności wprowadzonych działań.
+
+Wyniki analizy mogą posłużyć jako podstawa do opracowania strategii doskonalenia systemu szkoleń, lepszego dopasowania oferty do potrzeb poszczególnych grup pracowników oraz oceny zwrotu z inwestycji w rozwój kadr.
+
+# Część I -- analiza opisowa
+
+## Zadanie 1 -- Wczytanie i przygotowanie danych
+
+Pierwszym krokiem analizy jest import surowych danych z pliku `ankieta.csv` oraz ich transformacja do postaci odpowiedniej do analizy statystycznej. Plik zawiera odpowiedzi pracowników zebrane w ramach badania ankietowego.
+
+Zmienne jakościowe (dział, staż pracy, płeć, stanowisko, odpowiedzi na pytania) są przekształcane na **faktory** -- uporządkowane zmienne kategoryczne. Dzięki temu R poprawnie interpretuje ich hierarchię (np. skala Likerta od „Zdecydowanie nie zgadzam się" do „Zdecydowanie zgadzam się") i uwzględnia ją podczas tworzenia tabel oraz wykresów. Zmienna wiek jest przekształcana na typ numeryczny.
+
+```{r}
+dane <- read.csv("ankieta.csv",
+    stringsAsFactors = FALSE,
+    fileEncoding     = "UTF-8",
+    check.names      = FALSE,
+    sep              = ";"
+)
+```
+
+```{r}
+dane <- dane %>%
+    mutate(
+        DZIAL = factor(DZIAL, levels = c("HR", "IT", "PD", "MK")),
+        STAZ = factor(STAZ,
+            levels = c(1, 2, 3),
+            labels = c("Poniżej 1 roku", "1-3 lata", "Powyżej 3 lat")
+        ),
+        CZY_KIER = factor(CZY_KIER, levels = c("Tak", "Nie")),
+        PLEC = factor(PLEC, levels = c("K", "M")),
+        PYT_1 = factor(PYT_1,
+            levels = c(-2, -1, 0, 1, 2),
+            labels = c(
+                "Zdec. nie zgadzam", "Nie zgadzam",
+                "Nie mam zdania", "Zgadzam", "Zdec. zgadzam"
+            )
+        ),
+        PYT_2 = factor(PYT_2,
+            levels = c(-2, -1, 1, 2),
+            labels = c(
+                "Zdec. nie zgadzam", "Nie zgadzam",
+                "Zgadzam", "Zdec. zgadzam"
+            )
+        ),
+        PYT_3 = factor(PYT_3,
+            levels = c(-2, -1, 1, 2),
+            labels = c(
+                "Zdec. nie zgadzam", "Nie zgadzam",
+                "Zgadzam", "Zdec. zgadzam"
+            )
+        ),
+        WIEK = as.numeric(WIEK)
+    )
+```
+
+Po wczytaniu danych wyświetlamy poziomy każdego faktora oraz zakres zmiennej WIEK jako weryfikację poprawności wczytania:
+
+```{r}
+for (v in c("DZIAL", "STAZ", "CZY_KIER", "PLEC", "PYT_1", "PYT_2", "PYT_3")) {
+    cat(v, ":", paste(levels(dane[[v]]), collapse = ", "), "\n")
+}
+cat("Zakres WIEK:", range(dane$WIEK, na.rm = TRUE), "\n")
+```
+
+### Weryfikacja braków danych
+
+Przed przystąpieniem do właściwej analizy kluczowe jest sprawdzenie kompletności zbioru. Braki danych mogą wynikać z odmowy odpowiedzi przez respondenta, błędów w procesie zbierania danych lub -- jak w przypadku zmiennej `PYT_3` -- z faktu, że pytanie było zadawane tylko wybranej podgrupie (np. pracownikom, którzy uczestniczyli w drugiej turze badań).
+
+```{r}
+braki <- dane %>%
+    summarise(across(everything(), ~ sum(is.na(.)))) %>%
+    pivot_longer(everything(),
+        names_to  = "Zmienna",
+        values_to = "Liczba braków"
+    )
+
+kable(braki,
+    caption  = "Liczba brakow danych dla kazdej zmiennej",
+    booktabs = TRUE,
+    linesep  = "",
+    escape   = TRUE
+) %>%
+    kable_styling(
+        latex_options = c("striped", "hold_position"),
+        full_width = FALSE
+    )
+```
+
+**Wnioski:** Tabela przedstawia liczbę brakujących obserwacji dla każdej zmiennej. Jeśli braki dotyczą wyłącznie zmiennej `PYT_3`, jest to zjawisko oczekiwane -- pytanie to zadawano jedynie osobom uczestniczącym w ponownym badaniu po cyklu szkoleń. Braki w pozostałych zmiennych demograficznych (jeśli wystąpią) wymagają ostrożności przy interpretacji -- mogą świadczyć o selektywnej odmowie odpowiedzi. W dalszej analizie braki są ignorowane lokalnie (operacja `filter(!is.na())`), co oznacza, że mianowniki w obliczeniach procentowych odnoszą się do liczby ważnych obserwacji, nie do pełnej próby.
+
+## Zadanie 2 -- Kategoryzacja zmiennej wiekowej
+
+Ciągła zmienna wieku jest trudna do bezpośredniej analizy tabelarycznej -- każdy unikalny wiek tworzyłby osobną kategorię. Stosujemy **dyskretyzację** (ang. *binning*): dzielimy wiek respondentów na cztery przedziały prawostronnie domknięte, wybrane tak, aby odpowiadały naturalnym etapom kariery zawodowej:
+
+-   **Do 35 lat** -- pracownicy na początku kariery (juniorzy, mid-level);
+-   **36--45 lat** -- pracownicy w środkowym stadium kariery (seniorzy, specjaliści);
+-   **46--55 lat** -- kadra z długim doświadczeniem, często menedżerska;
+-   **Powyżej 55 lat** -- pracownicy zbliżający się do końca kariery zawodowej.
+
+Podział ten pozwala ocenić, czy preferencje i oceny szkoleń różnią się między pokoleniami, co jest szczególnie istotne w kontekście rosnących różnic między podejściem do nauki pokolenia Z a starszymi rocznikami.
+
+```{r}
+dane <- dane %>%
+    mutate(
+        WIEK_KAT = cut(WIEK,
+            breaks = c(-Inf, 35, 45, 55, Inf),
+            labels = c("Do 35 lat", "36-45 lat", "46-55 lat", "Pow. 55 lat"),
+            right  = TRUE
+        )
+    )
+
+table(dane$WIEK_KAT)
+```
+
+## Zadanie 3 -- Analiza struktury respondentów (tablice liczności)
+
+Tablice liczności pozwalają ocenić, jak zróżnicowana jest badana próba pod względem demograficznym i organizacyjnym. Jest to kluczowy krok przed analizą odpowiedzi na pytania merytoryczne -- pozwala zidentyfikować ewentualne **efekty składu próby**: jeśli np. jedna z grup jest wyraźnie nadreprezentowana, jej opinie będą miały nieproporcjonalnie duży wpływ na wyniki zbiorcze.
+
+```{r}
+make_tab_licznosci <- function(zm, nazwa) {
+    tab <- dane %>%
+        count({{ zm }}) %>%
+        filter(!is.na({{ zm }})) %>%
+        mutate(Procent = round(n / sum(n) * 100, 1)) %>%
+        rename(Kategoria = 1, Licznosc = n, `Udzial proc.` = Procent)
+    kable_raw(tab, paste("Tablica liczności --", nazwa))
+}
+```
+
+### Podział organizacyjny i staż pracy
+
+Poniższe tablice przedstawiają rozkład respondentów według przynależności do działu oraz stażu pracy. Informacje te są niezbędne do oceny reprezentatywności próby -- czy wszystkie działy są proporcjonalnie reprezentowane, oraz czy przeważają pracownicy nowi czy doświadczeni.
+
+```{r results='asis'}
+side_by_side(
+    make_tab_licznosci(DZIAL, "Dział (DZIAL)"),
+    make_tab_licznosci(STAZ, "Staż pracy (STAZ)")
+)
+```
+
+**Wnioski:** Analiza podziału na działy pozwala ocenić, czy wyniki ankiety są reprezentatywne dla całej firmy, czy też zdominowane przez jeden dział. Jeżeli np. dział IT stanowi ponad 50% próby, a szkolenia są projektowane z myślą o tym dziale, oceny mogą być systematycznie wyższe niż gdyby badano firmę w sposób warstwowy. Podobnie rozkład stażu pracy informuje o dojrzałości kadry -- dominacja pracowników z krótkim stażem sugeruje, że firma intensywnie rekrutuje i że szkolenia wdrożeniowe (onboardingowe) mają szczególne znaczenie. Pracownicy z długim stażem mają z kolei wyższe i bardziej specyficzne oczekiwania szkoleniowe, co może prowadzić do niższych ocen ogólnych.
+
+### Płeć, stanowisko kierownicze i wiek
+
+Kolejne trzy tablice charakteryzują próbę pod kątem płci, udziału kadry kierowniczej oraz struktury wiekowej. Dane te są istotne przy interpretacji wyników -- pozwalają ocenić, czy obserwowane różnice w ocenach wynikają z czynników demograficznych.
+
+```{r results='asis'}
+side_by_side(
+    make_tab_licznosci(CZY_KIER, "Stanowisko kierownicze"),
+    make_tab_licznosci(PLEC, "Płeć (PLEC)")
+)
+```
+
+```{r}
+tab_wiek <- dane %>%
+    count(WIEK_KAT) %>%
+    filter(!is.na(WIEK_KAT)) %>%
+    mutate(Procent = round(n / sum(n) * 100, 1)) %>%
+    rename(Kategoria = 1, Licznosc = n, `Udzial proc.` = Procent)
+
+kable(tab_wiek,
+    caption  = "Tablica liczności -- Kategoria wiekowa (WIEK\\_KAT)",
+    booktabs = TRUE,
+    linesep  = "",
+    escape   = FALSE
+) %>%
+    kable_styling(
+        latex_options = c("striped", "hold_position"),
+        full_width = FALSE
+    )
+```
+
+**Wnioski:** Odsetek kadry kierowniczej w próbie powinien być zbliżony do rzeczywistej struktury firmy -- standardowo kierownicy stanowią 15--25% załogi. Znaczna nadreprezentacja menedżerów mogłaby zawyżać oceny szkoleń (menedżerowie częściej uczestniczą w szkoleniach i mogą postrzegać je bardziej pozytywnie). W zakresie płci warto sprawdzić, czy próba odzwierciedla strukturę firmy -- nierównowaga płci w ankiecie może zniekształcać wyniki, jeśli kobiety i mężczyźni mają różne doświadczenia ze szkoleniami. Analiza struktury wiekowej pozwala ocenić, czy firma zatrudnia głównie młodszych pracowników (profil typowy dla firm technologicznych i start-upów) czy ma bardziej zrównoważony rozkład wieku.
+
+# Zadanie 4 -- Rozkłady odpowiedzi na pytania ankietowe
+
+Analiza rozkładów odpowiedzi na poszczególne pytania stanowi rdzeń analizy opisowej. Dla każdego pytania prezentujemy dwa uzupełniające się wykresy: **kołowy** (szybka ocena proporcji) oraz **słupkowy** (precyzyjne porównanie kategorii). Takie zestawienie pozwala jednocześnie uchwycić obraz całości i dostrzec różnice między kategoriami odpowiedzi.
+
+## Pytanie 1: Zadowolenie z dostępności materiałów szkoleniowych
+
+Pytanie 1 mierzy, w jakim stopniu pracownicy zgadzają się ze stwierdzeniem dotyczącym dostępności materiałów szkoleniowych. Zastosowano **pięciostopniową skalę Likerta** z opcją neutralną („Nie mam zdania"), co pozwala respondentom wyrazić brak wyrobionego zdania bez zmuszania ich do arbitralnego wyboru.
+
+```{r fig.width=10, fig.height=4, dev='ragg_png', dpi=300}
+kol5 <- c("#d73027", "#fc8d59", "#fee090", "#91bfdb", "#4575b4")
+
+df1 <- dane %>%
+    count(PYT_1) %>%
+    filter(!is.na(PYT_1)) %>%
+    mutate(
+        pct = n / sum(n) * 100,
+        lab = paste0(round(pct, 1), "%")
+    )
+
+p_kol1 <- ggplot(df1, aes(x = "", y = pct, fill = PYT_1)) +
+    geom_col(width = 1, color = "white") +
+    coord_polar("y") +
+    geom_text(aes(label = lab), position = position_stack(vjust = 0.5), size = 3) +
+    scale_fill_manual(values = kol5) +
+    labs(title = "PYT_1 – Udział procentowy (kołowy)", fill = NULL) +
+    theme_void() +
+    theme(
+        legend.position = "bottom",
+        legend.text = element_text(size = 8),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 11)
+    )
+
+p_slup1 <- ggplot(df1, aes(x = PYT_1, y = pct, fill = PYT_1)) +
+    geom_col(color = "white", show.legend = FALSE) +
+    geom_text(aes(label = lab), vjust = -0.5, size = 3.5) +
+    scale_fill_manual(values = kol5) +
+    scale_y_continuous(
+        limits = c(0, max(df1$pct) * 1.2),
+        labels = label_percent(scale = 1)
+    ) +
+    labs(title = "PYT_1 – Rozkład opinii (słupkowy)", x = NULL, y = "Odsetek (%)") +
+    theme_minimal(base_size = 10) +
+    theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 20, hjust = 1, size = 9)
+    )
+
+grid.arrange(p_kol1, p_slup1, ncol = 2)
+```
+
+**Analiza:** Równoległe zestawienie obu wykresów umożliwia wielowymiarową ocenę rozkładu opinii. Dominacja odpowiedzi pozytywnych („Zgadzam się" i „Zdecydowanie zgadzam się") świadczyłaby o satysfakcji pracowników z dostępności materiałów szkoleniowych. Jednak istotny udział odpowiedzi neutralnych („Nie mam zdania") może wskazywać na niewystarczającą świadomość dostępnych zasobów -- pracownicy nie korzystają z materiałów nie dlatego, że je oceniają negatywnie, lecz dlatego, że nie wiedzą o ich istnieniu. Jest to sygnał do działań komunikacyjnych (np. kampania informacyjna o platformie e-learningowej). Wysoki odsetek odpowiedzi negatywnych wymagałby natomiast audytu jakości i dostępności zasobów szkoleniowych.
+
+## Pytanie 2: Szkolenia a możliwości awansu i potrzeby rozwojowe
+
+Pytanie 2 ocenia, czy realizowane szkolenia odpowiadają potrzebom rozwojowym pracowników i wspierają ich ścieżkę kariery. W odróżnieniu od pytania 1 zastosowano **wymuszoną skalę czterostopniową** (bez opcji neutralnej), co skłania respondentów do jednoznacznego opowiedzenia się po stronie aprobaty lub krytyki. Takie podejście jest stosowane celowo, gdy badacz chce uniknąć skupiania się odpowiedzi w środku skali.
+
+```{r fig.width=10, fig.height=4, dev='ragg_png', dpi=300}
+kol4 <- c("#d73027", "#fc8d59", "#91bfdb", "#4575b4")
+
+df2 <- dane %>%
+    count(PYT_2) %>%
+    filter(!is.na(PYT_2)) %>%
+    mutate(
+        pct = n / sum(n) * 100,
+        lab = paste0(round(pct, 1), "%")
+    )
+
+p_kol2 <- ggplot(df2, aes(x = "", y = pct, fill = PYT_2)) +
+    geom_col(width = 1, color = "white") +
+    coord_polar("y") +
+    geom_text(aes(label = lab), position = position_stack(vjust = 0.5), size = 3) +
+    scale_fill_manual(values = kol4) +
+    labs(title = "PYT_2 – Udział procentowy (kołowy)", fill = NULL) +
+    theme_void() +
+    theme(
+        legend.position = "bottom",
+        legend.text = element_text(size = 8),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 11)
+    )
+
+p_slup2 <- ggplot(df2, aes(x = PYT_2, y = pct, fill = PYT_2)) +
+    geom_col(color = "white", show.legend = FALSE) +
+    geom_text(aes(label = lab), vjust = -0.5, size = 3.5) +
+    scale_fill_manual(values = kol4) +
+    scale_y_continuous(
+        limits = c(0, max(df2$pct) * 1.2),
+        labels = label_percent(scale = 1)
+    ) +
+    labs(title = "PYT_2 – Rozkład opinii (słupkowy)", x = NULL, y = "Odsetek (%)") +
+    theme_minimal(base_size = 10) +
+    theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 20, hjust = 1, size = 9)
+    )
+
+grid.arrange(p_kol2, p_slup2, ncol = 2)
+```
+
+**Analiza:** Wymuszona skala czterostopniowa wyraźnie polaryzuje odpowiedzi, ułatwiając identyfikację dominującego nastroju. Jeśli pytanie 2 wypada gorzej niż pytanie 1, oznacza to, że pracownicy doceniają dostępność materiałów (PYT_1), ale uważają, że szkolenia słabo przekładają się na ich realne możliwości awansu i nie odpowiadają ich indywidualnym potrzebom (PYT_2). Jest to częsty problem w organizacjach oferujących ustandaryzowane, „katalogowe" programy szkoleniowe zamiast ścieżek skrojonych pod konkretne role i ambicje pracowników. Taki wynik powinien skłonić dział HR do wdrożenia **indywidualnych planów rozwoju (IDP)** oraz regularnych rozmów menedżer--pracownik o potrzebach szkoleniowych.
+
+# Zadanie 5 -- Tablice wielodzielcze (krzyżowe)
+
+Tablice krzyżowe (kontyngencji) pozwalają zbadać związek między zmiennymi demograficznymi i organizacyjnymi a ocenami szkoleń wyrażonymi w pytaniu 1. Dla każdej pary zmiennych tworzymy dwie tabele: **liczebności** (ile osób w danej grupie udzieliło danej odpowiedzi) oraz **profil kolumnowy** (jaki odsetek danej grupy udzielił danej odpowiedzi). Profil kolumnowy jest kluczowy -- pozwala porównywać grupy o różnych liczebnościach na wspólnej skali procentowej.
+
+Interpretacja: jeśli profile kolumnowe wyraźnie różnią się między grupami (np. pracownicy IT są wyraźnie bardziej zadowoleni niż pracownicy HR), mamy do czynienia ze **zróżnicowaniem wewnętrznym** wymagającym pogłębionej analizy i zróżnicowania oferty szkoleniowej.
+
+```{r}
+make_cross <- function(var2, nazwa2) {
+    tab <- table(PYT_1 = dane$PYT_1, dane[[var2]])
+    tab_pct <- round(prop.table(tab, margin = 2) * 100, 1)
+
+    df_tab <- as.data.frame.matrix(tab)
+    df_tab_pct <- as.data.frame.matrix(tab_pct)
+
+    list(
+        kable_raw(df_tab, paste("PYT\\_1 vs", nazwa2, "– Liczebności")),
+        kable_raw(df_tab_pct, paste("PYT\\_1 vs", nazwa2, "– Profil kolumnowy (\\%)"))
+    )
+}
+```
+
+## Analiza względem cech organizacyjnych
+
+### Pytanie 1 a dział
+
+Porównanie ocen między działami pozwala ocenić, czy oferta szkoleniowa jest jednakowo dobrze dopasowana do specyfiki pracy w różnych częściach organizacji. Działy różnią się profilem zawodowym, tempem zmian technologicznych i kulturą organizacyjną, co może przekładać się na odmienne oczekiwania wobec szkoleń.
+
+```{r results='asis'}
+r1 <- make_cross("DZIAL", "Dział")
+side_by_side(r1[[1]], r1[[2]])
+```
+
+**Wnioski:** Jeżeli profile kolumnowe są zbliżone między działami, oferta szkoleniowa jest postrzegana równomiernie w całej organizacji. Jeśli natomiast jeden dział wyraźnie odbiega od pozostałych (szczególnie w kierunku negatywnym), warto zbadać, czy szkolenia są odpowiednio dostosowane do jego specyfiki. Dział IT może np. oczekiwać bardziej zaawansowanych technicznie szkoleń, dział HR -- szkoleń miękkich i z zakresu prawa pracy, a dział marketingu (MK) -- szkoleń z narzędzi cyfrowych i analityki.
+
+### Pytanie 1 a staż pracy
+
+Staż pracy jest jednym z najważniejszych moderatorów oceny szkoleń. Pracownicy z krótkim stażem oceniają szkolenia przez pryzmat wdrożenia i zdobywania podstawowych kompetencji, podczas gdy weterani oczekują szkoleń zaawansowanych, specjalistycznych i przekładających się na konkretne projekty.
+
+```{r results='asis'}
+r2 <- make_cross("STAZ", "Staż pracy")
+cat("\\vspace{4pt}\n")
+cat(strip_float(r2[[1]]))
+cat("\n\\vspace{8pt}\n")
+cat(strip_float(r2[[2]]))
+cat("\n\\vspace{4pt}\n")
+```
+
+**Wnioski:** Różnice w profilach kolumnowych między grupami stażu wskazują na potrzebę **segmentacji programów szkoleniowych**. Jeśli pracownicy z najdłuższym stażem oceniają szkolenia najgorzej, może to świadczyć o braku oferty dla ekspertów lub o tym, że istniejące szkolenia są zbyt podstawowe dla tej grupy. Z kolei nowi pracownicy, jeśli oceniają pozytywnie, potwierdzają skuteczność programu onboardingowego. Firma powinna rozważyć stworzenie odrębnych ścieżek szkoleniowych: wdrożeniowej (dla osób z krótkim stażem) i zaawansowanej (dla weteranów).
+
+### Pytanie 1 a stanowisko kierownicze
+
+Menedżerowie i pracownicy szeregowi uczestniczą w różnych typach szkoleń i mają odmienne potrzeby -- pierwsi skupiają się na kompetencjach przywódczych i zarządzaniu, drudzy na umiejętnościach technicznych i branżowych. Analiza tej zmiennej pozwala ocenić, czy oba segmenty są jednakowo dobrze obsługiwane przez dział szkoleń.
+
+```{r results='asis'}
+r3 <- make_cross("CZY_KIER", "Stanowisko kierownicze")
+side_by_side(r3[[1]], r3[[2]])
+```
+
+**Wnioski:** Duże różnice między kierownikami a pracownikami szeregowymi w profilach kolumnowych wskazują na asymetrię w postrzeganiu wartości szkoleń. Jeśli menedżerowie oceniają wyżej, może to wynikać z faktu, że mają większy wpływ na dobór szkoleń (sami je wybierają lub zamawiają) i uczestniczą w droższych, lepiej dopasowanych programach zewnętrznych. Jeśli oceniają niżej, może to sygnalizować, że firma inwestuje głównie w szkolenia operacyjne, zaniedbując rozwój kompetencji menedżerskich.
+
+## Pytanie 1 a płeć
+
+Analiza różnic między kobietami a mężczyznami w ocenie materiałów szkoleniowych pozwala ocenić, czy polityka szkoleniowa firmy jest neutralna pod względem płci, czy też jedna z grup jest systematycznie gorzej obsługiwana.
+
+```{r results='asis'}
+r4 <- make_cross("PLEC", "Płeć")
+side_by_side(r4[[1]], r4[[2]])
+```
+
+**Wnioski:** Brak istotnych różnic między kobietami a mężczyznami w profilach kolumnowych świadczyłby o neutralności płciowej polityki szkoleniowej -- co jest pożądanym wynikiem. Jeśli jednak jedna z grup wyraźnie gorzej ocenia dostępność materiałów szkoleniowych, warto zbadać przyczyny: mogą one tkwić w strukturze zatrudnienia (kobiety i mężczyźni koncentrują się w różnych działach lub na różnych stanowiskach) lub w treści szkoleń (programy nieuwzględniające perspektywy jednej z płci). Wyniki tej tablicy powinny być interpretowane łącznie z rozkładem płci w poszczególnych działach, aby wykluczyć efekty interakcji między zmiennymi.
+
+## Przygotowanie zmiennych CZY_ZADOW i CZY_ZADOW_2
+
+Zgodnie z poleceniem, przed przystąpieniem do analizy inferencyjnej (estymacji i testowania hipotez), konstruujemy binarne zmienne określające zadowolenie ze szkoleń. Zmienne `CZY_ZADOW` oraz `CZY_ZADOW_2` powstaną poprzez zagregowanie pozytywnych i negatywnych odpowiedzi na pytania, odpowiednio, `PYT_2` oraz `PYT_3`.
+
+```{r}
+dane <- dane %>%
+    mutate(
+        CZY_ZADOW = case_when(
+            PYT_2 %in% c("Zdec. nie zgadzam", "Nie zgadzam") ~ 0,
+            PYT_2 %in% c("Zgadzam", "Zdec. zgadzam") ~ 1,
+            TRUE ~ NA_real_
+        ),
+        CZY_ZADOW_2 = case_when(
+            PYT_3 %in% c("Zdec. nie zgadzam", "Nie zgadzam") ~ 0,
+            PYT_3 %in% c("Zgadzam", "Zdec. zgadzam") ~ 1,
+            TRUE ~ NA_real_
+        )
+    )
+```
+
+# Część II -- Estymacja przedziałowa
+
+## Zadanie 2 -- Funkcja dla przedziału Cloppera-Pearsona
+
+Przedział ufności Cloppera-Pearsona (tzw. przedział dokładny) opiera się na rozkładzie dwumianowym. Wykorzystuje on kwantyle rozkładu Beta do wyznaczenia dolnej i górnej granicy. Poniżej zdefiniowano funkcję `clopper_pearson`, która jako argumenty przyjmuje poziom ufności, ułamek sukcesów i liczbę prób (lub opcjonalnie wektor danych, z którego sama oblicza te wartości).
+
+```{r}
+clopper_pearson <- function(conf.level = 0.95, x = NULL, n = NULL, data_vec = NULL) {
+    if (!is.null(data_vec)) {
+        data_vec <- na.omit(data_vec)
+        n <- length(data_vec)
+        x <- sum(data_vec == 1)
+    }
+
+    alpha <- 1 - conf.level
+
+    lower <- ifelse(x == 0, 0, qbeta(alpha / 2, x, n - x + 1))
+    upper <- ifelse(x == n, 1, qbeta(1 - alpha / 2, x + 1, n - x))
+
+    return(c(lower = lower, upper = upper))
+}
+```
+
+## Zadanie 3 -- Realizacje przedziałów ufności
+
+Wykorzystując utworzoną funkcję wyznaczamy przedziały ufności dla prawdopodobieństwa zadowolenia ze szkoleń w pierwszym okresie (`CZY_ZADOW`) oraz po modyfikacji szkoleń (`CZY_ZADOW_2`), na poziomie ufności $1-\alpha = 0.95$. \newpage{}
+
+```{r}
+# Okres 1
+cp_1 <- clopper_pearson(conf.level = 0.95, data_vec = dane$CZY_ZADOW)
+# Okres 2
+cp_2 <- clopper_pearson(conf.level = 0.95, data_vec = dane$CZY_ZADOW_2)
+
+df_cp <- data.frame(
+    Okres = c("Przed modyfikacją (CZY_ZADOW)", "Po modyfikacji (CZY_ZADOW_2)"),
+    `Dolna Granica` = c(cp_1["lower"], cp_2["lower"]),
+    `Górna Granica` = c(cp_1["upper"], cp_2["upper"]),
+    check.names = FALSE
+)
+
+kable(df_cp,
+    digits = 4, caption = "Przedziały ufności Cloppera-Pearsona (95 proc.)",
+    booktabs = TRUE
+) %>%
+    kable_styling(latex_options = "hold_position")
+```
+
+**Wnioski:** Jak widać, szerokość przedziału w drugim okresie jest inna, co może wynikać z faktu, że zmienna `PYT_3` ma zmniejszoną liczbę obserwacji (nie wszyscy pracownicy uczestniczyli w drugiej turze, stąd większa niepewność). Odsetek osób zadowolonych ze szkoleń możemy jednakże z 95% pewnością umiejscowić w wyznaczonych przedziałach.
+
+## Zadanie 4 -- Symulacje prawdopodobieństwa pokrycia i długości
+
+Przeprowadzimy symulację porównującą przedziały ufności: Cloppera-Pearsona (dokładny), Walda (asymptotyczny) oraz przedział Wilsona dla różnych wielkości próby $n \in \{30, 100, 1000\}$ oraz prawdopodobieństw sukcesu $p \in (0, 1)$.
+
+```{r fig.height=8, fig.width=10, dev='ragg_png', dpi=300}
+set.seed(123)
+n_vals <- c(30, 100, 1000)
+p_vals <- seq(0.01, 0.99, length.out = 100)
+n_sim <- 5000
+alpha <- 0.05
+z <- qnorm(1 - alpha / 2)
+
+wyniki <- data.frame()
+
+for (n in n_vals) {
+    for (p in p_vals) {
+        x_sim <- rbinom(n_sim, n, p)
+
+        # Clopper-Pearson
+        cp_low <- qbeta(alpha / 2, x_sim, n - x_sim + 1)
+        cp_low[x_sim == 0] <- 0
+        cp_up <- qbeta(1 - alpha / 2, x_sim + 1, n - x_sim)
+        cp_up[x_sim == n] <- 1
+
+        # Wald
+        p_hat <- x_sim / n
+        margin_wald <- z * sqrt(p_hat * (1 - p_hat) / n)
+        wald_low <- p_hat - margin_wald
+        wald_up <- p_hat + margin_wald
+
+        # Wilson
+        p_tilde <- (x_sim + z^2 / 2) / (n + z^2)
+        n_tilde <- n + z^2
+        margin_wilson <- z * sqrt(p_tilde * (1 - p_tilde) / n_tilde)
+        wil_low <- p_tilde - margin_wilson
+        wil_up <- p_tilde + margin_wilson
+
+        # Wyliczanie pokrycia
+        cover_cp <- mean(cp_low <= p & p <= cp_up)
+        cover_wald <- mean(wald_low <= p & p <= wald_up)
+        cover_wil <- mean(wil_low <= p & p <= wil_up)
+
+        # Średnie długości przedziałów
+        len_cp <- mean(cp_up - cp_low)
+        len_wald <- mean(wald_up - wald_low)
+        len_wil <- mean(wil_up - wil_low)
+
+        wyniki <- rbind(wyniki, data.frame(
+            n = n, p = p,
+            Method = rep(c("Clopper-Pearson", "Wald", "Wilson"), each = 1),
+            Coverage = c(cover_cp, cover_wald, cover_wil),
+            Length = c(len_cp, len_wald, len_wil)
+        ))
+    }
+}
+
+wyniki$n_label <- factor(paste("n =", wyniki$n),
+    levels = c("n = 30", "n = 100", "n = 1000")
+)
+
+p_cov <- ggplot(wyniki, aes(x = p, y = Coverage, color = Method)) +
+    geom_line(alpha = 0.8, linewidth = 0.8) +
+    geom_hline(yintercept = 0.95, linetype = "dashed", color = "black") +
+    facet_wrap(~n_label, ncol = 1) +
+    theme_minimal() +
+    labs(title = "Prawdopodobieństwo pokrycia (Nominalne 95 procent)", y = "Pokrycie")
+
+p_len <- ggplot(wyniki, aes(x = p, y = Length, color = Method)) +
+    geom_line(alpha = 0.8, linewidth = 0.8) +
+    facet_wrap(~n_label, ncol = 1) +
+    theme_minimal() +
+    labs(title = "Średnia szerokość przedziału ufności", y = "Szerokość")
+
+grid.arrange(p_cov, p_len, ncol = 2)
+```
+
+**Wnioski z symulacji:** 1. **Przedział Walda:** Posiada bardzo słabe właściwości w przypadku brzegowych prawdopodobieństw (bliskich 0 oraz 1), szczególnie dla małych prób ($n=30$). Jego pokrycie spada często drastycznie poniżej nominalnego 95%. Dodatkowo wariancja oszacowana staje się 0 na brzegach (długość przedziału spada do 0), co skutkuje całkowitym brakiem pokrycia. 2. **Przedział Cloppera-Pearsona:** Jest tzw. przedziałem zachowawczym (konserwatywnym) - prawdopodobieństwo pokrycia nie spada poniżej zakładanego $1-\alpha$, i oscyluje powyżej wielkości 0.95. Odbywa się to jednak kosztem nieco szerszego przedziału w porównaniu do innych metod. 3. **Przedział Wilsona:** Stanowi bardzo dobre rozwiązanie i kompromis - charakteryzuje się pokryciem bliższym 95% w całym zasięgu $p$, a jego szerokość jest zadowalająco wąska. Dla danych rzeczywistych, takich jak w naszej ankiecie (n=200), korzystne byłoby wykorzystanie stabilnego przedziału Wilsona lub dokładnego Cloppera-Pearsona.
+
+# Część III -- Weryfikacja hipotez statystycznych
+
+## Zadanie 5 -- Weryfikacja wybranych hipotez
+
+Do weryfikacji układów hipotez korzystamy ze wbudowanych funkcji `binom.test` oraz `prop.test` z biblioteki `stats`. Przeprowadzamy testy na poziomie istotności $\alpha = 0.05$.
+
+```{r, dev='ragg_png', dpi=300}
+# 1. Prawdopodobieństwo, że w firmie pracuje kobieta wynosi 0.5.
+# H0: p = 0.5, H1: p != 0.5
+n_kobiety <- sum(dane$PLEC == "K", na.rm = TRUE)
+n_total <- sum(!is.na(dane$PLEC))
+test1 <- binom.test(n_kobiety, n_total, p = 0.5, alternative = "two.sided")
+
+# 2. Prawdopodbieństwo, że pracownik uważa szkolenia za przystosowane
+# do swoich potrzeb w 1. okresie jest większe bądź równe 0.7.
+# Zwykle testujemy H0: p >= 0.7 przeciw H1: p < 0.7.
+c_1 <- sum(dane$CZY_ZADOW == 1, na.rm = TRUE)
+n_1 <- sum(!is.na(dane$CZY_ZADOW))
+test2 <- binom.test(c_1, n_1, p = 0.7, alternative = "less")
+
+# 3. Prawdopodobieństwo, że kobieta pracuje na stanowisku kierowniczym
+# jest równe prawdopodobieństwu, że mężczyzna pracuje na stanowisku kierowniczym.
+# H0: p_K = p_M, H1: p_K != p_M
+tab3 <- table(dane$PLEC, dane$CZY_KIER)
+test3 <- prop.test(tab3[, "Tak"], rowSums(tab3))
+
+# 4. Prawdopodobieństwo, że kobieta uważa szkolenia za przystosowane
+# w 1. okresie jest równe prawdopodobieństwu u mężczyzn.
+# H0: p_K = p_M, H1: p_K != p_M
+tab4 <- table(dane$PLEC, dane$CZY_ZADOW)
+test4 <- prop.test(tab4[, "1"], rowSums(tab4))
+
+# 5. Prawdopodobieństwo, że kobieta pracuje w HR jest >=
+# prawdopodobieństwu, że mężczyzna pracuje w HR.
+# H0: p_K >= p_M, H1: p_K < p_M
+dane$CZY_HR <- ifelse(dane$DZIAL == "HR", 1, 0)
+tab5 <- table(dane$PLEC, dane$CZY_HR)
+test5 <- prop.test(tab5[, "1"], rowSums(tab5), alternative = "less")
+
+df_tests <- data.frame(
+    Test = c(
+        "1. Odsetek kobiet = 0.5",
+        "2. Satysfakcja >= 0.7",
+        "3. Kierownictwo a płeć",
+        "4. Satysfakcja a płeć",
+        "5. Praca w HR a płeć (<=)"
+    ),
+    `P-value` = c(test1$p.value, test2$p.value, test3$p.value, test4$p.value, test5$p.value),
+    Wniosek = c(
+        ifelse(test1$p.value < 0.05, "Odrzucamy H0", "Brak podstaw do odrzucenia H0"),
+        ifelse(test2$p.value < 0.05, "Odrzucamy H0 (p<0.7)", "Brak podstaw do odrz. H0 (p>=0.7)"),
+        ifelse(test3$p.value < 0.05, "Odrzucamy H0", "Brak podstaw do odrzucenia H0"),
+        ifelse(test4$p.value < 0.05, "Odrzucamy H0", "Brak podstaw do odrzucenia H0"),
+        ifelse(test5$p.value < 0.05, "Odrzucamy H0 (p_K<p_M)", "Brak podstaw do odrz. H0")
+    ),
+    check.names = FALSE
+)
+
+kable(df_tests,
+    digits = 4, caption = "Podsumowanie wyników weryfikacji hipotez",
+    booktabs = TRUE
+) %>%
+    kable_styling(latex_options = c("striped", "hold_position"), full_width = FALSE)
+```
+
+**Wnioski z testowania hipotez:** Powyższa tabela prezentuje wyniki wszystkich testów (tzw. wartości *p-value* oraz podstawowe konkluzje przy poziomie istotności $5\%$). Jeśli *p-value* spada poniżej ustalonego progu odrzucenia ($\alpha = 0.05$), świadczy to o wystarczających dowodach na odrzucenie hipotezy zerowej $H_0$ i opowiedzenie się za hipotezą alternatywną, w innym wypadku nie mamy podstaw by odrzucić badane twierdzenie z testów proporcji. Na przykład w przypadku testu numer 2 badane jest czy satysfakcja wpisuje się w warunek $p \ge 0.7$. Uzyskanie wysokiego *p-value* dowodzi o braku podstaw, na których mielibyśmy uznać że satysfakcja jest istotnie niższa (jeśli *p* jest mniejsze od poziomu błędu, skłaniałoby to do tezy o niższym poziomie satysfakcji).
+
+## Zadanie 6 -- Weryfikacja mocy testu (Symulacja Monte Carlo)
+
+Przeprowadzimy symulację Monte Carlo porównującą moc testu dokładnego (`binom.test`) oraz asymptotycznego (`prop.test`) przy weryfikacji hipotezy zerowej $H_0: p = 0.9$ przeciwko hipotezie alternatywnej $H_1: p \neq 0.9$. Symulacja zostanie przeprowadzona dla trzech wielkości próby $n \in \{10, 100, 1000\}$ oraz wartości rzeczywistego prawdopodobieństwa sukcesu $p \in [0.7,\; 0.99]$. Dla każdej kombinacji parametrów generujemy $B = 5000$ replikacji Monte Carlo, co zapewnia stabilność estymacji mocy.
+
+```{r fig.height=7, fig.width=10, dev='ragg_png', dpi=300}
+set.seed(42)
+p_true_vals <- seq(0.7, 0.99, by = 0.01)
+n_vals_pwr <- c(10, 100, 1000)
+B <- 5000 # liczba replikacji Monte Carlo
+alpha_test <- 0.05
+
+power_res <- data.frame()
+
+for (n in n_vals_pwr) {
+    for (p_true in p_true_vals) {
+        x_sim <- rbinom(B, n, p_true)
+
+        # Test dokładny (Clopper-Pearson / binom.test)
+        pval_ex <- sapply(x_sim, function(x) {
+            binom.test(x, n, p = 0.9, alternative = "two.sided")$p.value
+        })
+
+        # Test asymptotyczny (prop.test)
+        pval_as <- sapply(x_sim, function(x) {
+            if (x == 0 || x == n) {
+                1.0 # brzegowe przypadki – unikanie błędów numerycznych
+            } else {
+                prop.test(x, n, p = 0.9, alternative = "two.sided")$p.value
+            }
+        })
+
+        rej_exact <- mean(pval_ex < alpha_test)
+        rej_asymp <- mean(pval_as < alpha_test)
+
+        power_res <- rbind(power_res, data.frame(
+            n = n, p_true = p_true,
+            Power_Exact = rej_exact,
+            Power_Asymp = rej_asymp
+        ))
+    }
+}
+
+power_long <- power_res %>%
+    pivot_longer(cols = starts_with("Power"), names_to = "TestType", values_to = "Power") %>%
+    mutate(
+        n_label = factor(paste("n =", n), levels = c("n = 10", "n = 100", "n = 1000")),
+        TestType = ifelse(TestType == "Power_Exact",
+            "Dokładny (binom.test)",
+            "Asymptotyczny (prop.test)"
+        )
+    )
+
+ggplot(power_long, aes(x = p_true, y = Power, color = TestType)) +
+    geom_line(alpha = 0.8, linewidth = 1) +
+    geom_vline(xintercept = 0.9, linetype = "dashed", color = "darkred") +
+    geom_hline(yintercept = alpha_test, linetype = "dotted", color = "grey40") +
+    facet_wrap(~n_label, ncol = 3) +
+    scale_y_continuous(labels = label_percent(scale = 100), limits = c(0, 1)) +
+    theme_minimal(base_size = 11) +
+    labs(
+        title = "Krzywe mocy testu (Monte Carlo, B = 5000) — H₀: p = 0.9",
+        x = "Prawdziwe prawdopodobieństwo sukcesu (p)",
+        y = "Moc testu (P odrzucenia H₀)",
+        color = "Metoda"
+    ) +
+    theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "bottom"
+    )
+```
+
+Dodatkowo prezentujemy tabelę porównawczą mocy obu testów dla wybranej wartości alternatywnej $p = 0.8$ (odchylenie o 10 p.p. od $H_0$):
+
+```{r}
+tab_power <- power_res %>%
+    filter(abs(p_true - 0.80) < 0.005) %>%
+    mutate(
+        `Moc – test dokładny` = paste0(round(Power_Exact * 100, 1), "%"),
+        `Moc – test asymptotyczny` = paste0(round(Power_Asymp * 100, 1), "%"),
+        `Różnica (asymp. − dokł.)` = paste0(round((Power_Asymp - Power_Exact) * 100, 1), " p.p.")
+    ) %>%
+    select(n, `Moc – test dokładny`, `Moc – test asymptotyczny`, `Różnica (asymp. − dokł.)`)
+
+kable(tab_power,
+    caption = "Porównanie mocy testów przy p = 0.8 (Monte Carlo, B = 5000)",
+    booktabs = TRUE, linesep = "", escape = TRUE
+) %>%
+    kable_styling(latex_options = c("striped", "hold_position"), full_width = FALSE)
+```
+
+**Wnioski z symulacji Monte Carlo:**
+
+1.  **Wpływ wielkości próby na moc:** Wyniki symulacji wyraźnie ilustrują fundamentalną zależność -- moc testu rośnie wraz z wielkością próby $n$. Dla $n = 10$ krzywa mocy jest bardzo płaska -- nawet znaczne odstępstwa od $H_0$ (np. $p = 0.7$) są wykrywane z niewielkim prawdopodobieństwem, co czyni test praktycznie bezużytecznym w wykrywaniu subtelnych różnic. Dla $n = 100$ moc wyraźnie wzrasta w miarę oddalania się od $p = 0.9$, a dla $n = 1000$ krzywa jest niemal skokowo stroma -- test wykrywa nawet odchylenia rzędu 2--3 punktów procentowych.
+
+2.  **Porównanie testu dokładnego i asymptotycznego:** Dla małych prób ($n = 10$) test dokładny (Cloppera-Pearsona / `binom.test`) jest bardziej zachowawczy -- jego empiryczny poziom istotności przy $H_0$ jest mniejszy od nominalnych 5%, co skutkuje nieco niższą mocą w porównaniu z testem asymptotycznym. Wraz ze wzrostem $n$ różnica między oboma metodami zanika, ponieważ aproksymacja normalną staje się coraz dokładniejsza.
+
+3.  **Praktyczne implikacje:** Dla danych ankietowych o wielkości zbliżonej do $n \approx 200$ (jak w naszym badaniu) oba testy mają zbliżoną, wysoką moc do wykrywania odstępstw rzędu 10 p.p. od testowanej wartości. Wybór próby $n \geq 100$ zapewnia solidną zdolność wykrywania praktycznie istotnych różnic.
