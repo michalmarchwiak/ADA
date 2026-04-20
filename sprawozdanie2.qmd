@@ -1,6 +1,6 @@
 ---
 title: "Analiza Danych Ankietowych — Sprawozdanie 2"
-author: "Imię Nazwisko"
+author: "Michał Marchwiak 276003 Weronika Mitulska 277475"
 date: today
 lang: pl
 format:
