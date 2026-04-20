@@ -1,0 +1,776 @@
+---
+title: "Analiza Danych Ankietowych — Sprawozdanie 2"
+author: "Imię Nazwisko"
+date: today
+lang: pl
+format:
+  pdf:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    documentclass: article
+    geometry:
+      - margin=2.2cm
+    fontsize: 11pt
+    fig-width: 6.5
+    fig-height: 4.2
+    fig-align: center
+    include-in-header:
+      text: |
+        \usepackage[utf8]{inputenc}
+        \usepackage[T1]{fontenc}
+        \usepackage{polski}
+        \usepackage{booktabs}
+        \usepackage{float}
+        \usepackage{amsmath, amssymb}
+execute:
+  echo: false
+  warning: false
+  message: false
+  cache: false
+knitr:
+  opts_chunk:
+    comment: "#>"
+    collapse: true
+---
+
+```{r setup, include=FALSE}
+# Biblioteki
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(knitr)
+  library(kableExtra)
+  library(DescTools)    # gamma, Kendall tau-b, MultinomCI (Sison-Glaz)
+  library(vcd)          # assoc plot
+  library(energy)       # dcor (zadanie *1)
+})
+
+set.seed(2025)
+
+# Wczytanie danych (CSV po konwersji do UTF-8, separator ';')
+dane <- read.csv2("ankieta.csv", stringsAsFactors = FALSE, fileEncoding = "UTF-8")
+colnames(dane) <- c("DZIAL","STAZ","CZY_KIER","PYT_1","PYT_2","PYT_3","PLEC","WIEK")
+
+# Kategoryzacja wieku: 4 grupy
+dane$WIEK_KAT <- cut(dane$WIEK,
+                     breaks = c(-Inf, 35, 45, 55, Inf),
+                     labels = c("do 35", "36-45", "46-55", "powyżej 55"),
+                     right  = TRUE)
+
+# Zmienna CZY_ZADOW zdefiniowana w sprawozdaniu 1:
+# pracownik zadowolony (Tak) gdy PYT_1 > 0, niezadowolony (Nie) w p.p.
+dane$CZY_ZADOW <- factor(ifelse(dane$PYT_1 > 0, "Tak", "Nie"),
+                         levels = c("Nie","Tak"))
+
+# Uporządkowane skale odpowiedzi (potrzebne do gamma/tau)
+dane$PYT_1_ord <- factor(dane$PYT_1, levels = c(-2,-1,0,1,2), ordered = TRUE)
+dane$PYT_2_ord <- factor(dane$PYT_2, levels = c(-2,-1,1,2),   ordered = TRUE)
+dane$STAZ_ord  <- factor(dane$STAZ,  levels = c(1,2,3),       ordered = TRUE)
+
+# Etykiety
+etyk_pyt1 <- c("bardzo niezad.", "niezad.", "bez zdania", "zad.", "bardzo zad.")
+etyk_pyt2 <- c("zdec. nie","nie zg.","zgadzam","zdec. tak")
+```
+
+# Wprowadzenie
+
+Raport jest kontynuacją sprawozdania 1 dotyczącego ankiety pracowniczej
+(n = 200, losowanie proste ze zwracaniem, cztery działy: IT, HR, MK, PD).
+Zachowano konwencje zmiennych z poprzedniego sprawozdania, w szczególności
+zmienną binarną `CZY_ZADOW` (Tak, jeśli `PYT_1 > 0`) oraz zmienną
+`WIEK_KAT` kategoryzującą wiek do czterech grup:
+`do 35`, `36--45`, `46--55`, `powyżej 55`.
+
+Wszystkie obliczenia wykonano w R. Ziarno losowe ustawiono `set.seed(2025)`
+(dotyczy testów bazujących na symulacji, m.in. Freemana--Haltona).
+
+---
+
+# Część I
+
+## Zadanie 1 — Przedział ufności dla wektora prawdopodobieństw
+
+Niech $X = (X_1,\dots,X_5) \sim \mathrm{Multinom}(n,p)$, gdzie
+$p = (p_1,\dots,p_5)$ jest wektorem prawdopodobieństw odpowiedzi
+"bardzo niezad.", "niezad.", "bez zdania", "zad.", "bardzo zad.".
+Oszacowanie to $\hat p_i = X_i/n$.
+
+**Jednoczesny przedział ufności na poziomie $1-\alpha$** uzyskujemy dwiema
+klasycznymi metodami:
+
+- **Goodman (1965)** --- oparta na odwróceniu $\chi^2$ z korektą Bonferroniego
+  (kwantyl $\chi^2_{1,\,\alpha/k}$, gdzie $k$ = liczba kategorii). Dla każdej
+  składowej:
+  $$
+  p_i \in \frac{A + 2 X_i \pm \sqrt{A\,(A + 4 X_i(n-X_i)/n)}}{2(n+A)},\qquad A = \chi^2_{1,\alpha/k}.
+  $$
+
+- **Sison, Glaz (1995)** --- przedział o jednakowej szerokości
+  $\hat p_i \pm d$, gdzie $d$ dobrane jest numerycznie tak, by
+  jednoczesny poziom ufności był $\ge 1-\alpha$.
+
+```{r zad1}
+# Dane z treści zadania
+x  <- c(14, 17, 40, 100, 29)
+n  <- sum(x)
+p_hat <- x / n
+alpha <- 0.05
+k  <- length(x)
+
+# --- (a) Goodman (Bonferroni + odwrócone chi^2_1) ---
+goodman_ci <- function(x, alpha = 0.05) {
+  n <- sum(x); k <- length(x)
+  A <- qchisq(1 - alpha/k, df = 1)
+  low <- (A + 2*x - sqrt(A*(A + 4*x*(n - x)/n))) / (2*(n + A))
+  up  <- (A + 2*x + sqrt(A*(A + 4*x*(n - x)/n))) / (2*(n + A))
+  cbind(lower = low, upper = up)
+}
+ci_g <- goodman_ci(x, alpha)
+
+# --- (b) Sison-Glaz (DescTools::MultinomCI) ---
+ci_sg_full <- DescTools::MultinomCI(x, conf.level = 1 - alpha, method = "sisonglaz")
+ci_sg <- ci_sg_full[, c("lwr.ci", "upr.ci")]
+
+tab1 <- data.frame(
+  Kategoria   = etyk_pyt1,
+  Liczebność  = x,
+  `p_hat`     = round(p_hat, 4),
+  `Goodman_L` = round(ci_g[,1], 4),
+  `Goodman_U` = round(ci_g[,2], 4),
+  `SG_L`      = round(ci_sg[,1], 4),
+  `SG_U`      = round(ci_sg[,2], 4),
+  check.names = FALSE
+)
+kable(tab1, caption = "Przedziały ufności 95\\% dla p — metody Goodmana i Sison-Glaz.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Opis Tabeli 1.** Kolumna `p_hat` podaje estymator MNW, kolejne pary kolumn
+zawierają dolne i górne końce jednoczesnych 95\% PU. Przedziały Sison--Glaz
+są zauważalnie węższe od Goodmana (kosztem dokładności asymptotycznej, S--G
+jest metodą o jednostajnej szerokości), lecz wnioski merytoryczne są zbieżne:
+kategoria "zadowoleni" dominuje ($p_4 \in [0.4133, 0.5906]$ Goodman,
+$[0.4305,0.5705]$ S--G), zaś kategorie skrajnie niezadowolonych
+($p_1, p_2$) mają prawdopodobieństwa rzędu kilku procent i ich przedziały
+są rozłączne z przedziałem kategorii dominującej.
+
+```{r zad1-plot, fig.cap="Oszacowania punktowe $\\hat p_i$ (punkty) oraz jednoczesne 95\\% przedziały ufności metodą Goodmana (pełne) i Sison-Glaz (przerywane)."}
+df_pl <- data.frame(
+  kat = factor(etyk_pyt1, levels = etyk_pyt1),
+  p_hat = p_hat,
+  gL = ci_g[,1], gU = ci_g[,2],
+  sL = ci_sg[,1], sU = ci_sg[,2]
+)
+ggplot(df_pl, aes(x = kat, y = p_hat)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = gL, ymax = gU), width = 0.18) +
+  geom_errorbar(aes(ymin = sL, ymax = sU), width = 0.32, linetype = 2) +
+  labs(x = "Kategoria odpowiedzi", y = expression(hat(p))) +
+  theme_minimal(base_size = 11)
+```
+
+**Opis Rysunku 1.** Widać monotoniczny wzrost oszacowań od kategorii skrajnie
+negatywnej do "zadowolony" i lekki spadek do "bardzo zadowolony". PU metody
+Goodmana są szersze dla kategorii o małej liczności (efekt asymptotyczny
+odwróconego $\chi^2_1$).
+
+\newpage
+
+## Zadanie 2 — Funkcja p-wartości w testach $\chi^2$ dla $H_0: p = p_0$
+
+Dla obserwacji $x = (x_1,\dots,x_k)$ wektora $X \sim \mathrm{Multinom}(n,p)$
+testujemy $H_0: p = p_0$. Statystyki:
+
+$$
+T_{\mathrm{P}}(x) = \sum_{i=1}^{k} \frac{(x_i - n p_{0i})^2}{n p_{0i}},
+\qquad
+T_{\mathrm{NW}}(x) = 2 \sum_{i=1}^{k} x_i \log\!\Bigl(\frac{x_i}{n p_{0i}}\Bigr).
+$$
+
+Przy $H_0$ obie statystyki mają asymptotycznie rozkład $\chi^2_{k-1}$,
+zatem p-wartość $= 1 - F_{\chi^2_{k-1}}(T_\cdot(x))$.
+
+```{r zad2}
+# Test chi-kwadrat (Pearsona) i NW dla H0: p = p0
+p_value_multinom <- function(x, p0,
+                             method = c("pearson", "LR"),
+                             exact = FALSE, B = 10000) {
+  method <- match.arg(method)
+  stopifnot(abs(sum(p0) - 1) < 1e-10, length(x) == length(p0), all(x >= 0))
+  n <- sum(x); k <- length(x); np0 <- n * p0
+
+  stat <- if (method == "pearson") {
+    sum((x - np0)^2 / np0)
+  } else {
+    # konwencja 0 log 0 = 0
+    pos <- x > 0
+    2 * sum(x[pos] * log(x[pos] / np0[pos]))
+  }
+  df <- k - 1
+  pval_asym <- 1 - pchisq(stat, df = df)
+
+  # opcjonalnie p-wartość Monte Carlo
+  pval_mc <- NA_real_
+  if (exact) {
+    T_obs <- stat
+    T_rep <- replicate(B, {
+      xr <- as.numeric(rmultinom(1, n, p0))
+      if (method == "pearson") sum((xr - np0)^2 / np0)
+      else {
+        pos <- xr > 0
+        2 * sum(xr[pos] * log(xr[pos] / np0[pos]))
+      }
+    })
+    pval_mc <- mean(T_rep >= T_obs)
+  }
+  list(statistic = stat, df = df,
+       p_value = pval_asym, p_value_MC = pval_mc,
+       method = method)
+}
+```
+
+Funkcja zwraca wartość statystyki, stopnie swobody oraz asymptotyczną
+p-wartość (a opcjonalnie dokładną Monte Carlo z ziarnem ustalonym globalnie).
+
+## Zadanie 3 — Rozkład odpowiedzi na PYT_1 w Dziale Produktowym (PD)
+
+Hipoteza $H_0: p = p_0 = (\tfrac15,\dots,\tfrac15)$ (rozkład równomierny
+na 5 kategoriach), $\alpha = 0{,}05$.
+
+```{r zad3}
+pd <- dane[dane$DZIAL == "PD", ]
+tab_pd <- table(factor(pd$PYT_1, levels = c(-2,-1,0,1,2)))
+x_pd <- as.numeric(tab_pd)
+p0 <- rep(1/5, 5)
+
+tab2 <- data.frame(
+  Kategoria  = etyk_pyt1,
+  Liczebność = x_pd,
+  `p_hat`    = round(x_pd/sum(x_pd), 3),
+  `np0`      = sum(x_pd)/5,
+  check.names = FALSE
+)
+kable(tab2, caption = "Zaobserwowane liczności PYT\\_1 w dziale PD vs. oczekiwane przy równomierności.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+
+res_P  <- p_value_multinom(x_pd, p0, method = "pearson")
+res_LR <- p_value_multinom(x_pd, p0, method = "LR")
+
+tab3 <- data.frame(
+  Test         = c("chi-kwadrat Pearsona","chi-kwadrat NW"),
+  Statystyka   = c(res_P$statistic, res_LR$statistic),
+  df           = c(res_P$df, res_LR$df),
+  `p-wartość`  = c(res_P$p_value, res_LR$p_value),
+  check.names  = FALSE
+)
+tab3$Statystyka <- round(tab3$Statystyka, 3)
+tab3$`p-wartość` <- signif(tab3$`p-wartość`, 3)
+kable(tab3, caption = "Wyniki testów H0: rozkład PYT\\_1 w dziale PD jest równomierny.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Opis Tabel 2--3.** W Tabeli 2 widać wyraźnie niejednorodny rozkład
+odpowiedzi: dominują odpowiedzi "zadowolony" (`PYT_1 = 1`), a obserwowane
+liczności znacznie odbiegają od wartości oczekiwanej
+$np_{0i} = 98/5 = 19{,}6$. W Tabeli 3 obie statystyki testowe przyjmują
+duże wartości, a p-wartości są znacznie mniejsze od $\alpha = 0{,}05$.
+
+**Wniosek.** Odrzucamy $H_0$. Rozkład odpowiedzi na pytanie PYT_1 w Dziale
+Produktowym nie jest równomierny --- pracownicy PD udzielają odpowiedzi
+pozytywnych istotnie częściej niż wynikałoby to z jednorodności.
+
+\newpage
+
+# Część II
+
+## Zadanie 4 — Test Fishera: PŁEĆ vs CZY_KIER
+
+```{r zad4}
+tab_pk <- table(dane$PLEC, dane$CZY_KIER)
+kable(addmargins(tab_pk), caption = "Tablica dwudzielcza PŁEĆ x CZY\\_KIER.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+
+ft <- fisher.test(tab_pk)
+ft
+```
+
+**Interpretacja.** $p$-wartość $= `r signif(ft$p.value,3)`$.
+Przy poziomie $\alpha = 0.05$ **`r ifelse(ft$p.value < 0.05,"odrzucamy","nie mamy podstaw do odrzucenia")`**
+hipotezy zerowej o niezależności zmiennych PŁEĆ i CZY_KIER. Oszacowanie
+ilorazu szans wynosi `r round(ft$estimate,3)` (95% PU:
+`r round(ft$conf.int[1],3)`--`r round(ft$conf.int[2],3)`).
+
+**Czy można wnioskować, że $P(K\,|\,\mathrm{kier}) = P(M\,|\,\mathrm{kier})$?**
+
+**Nie, bezpośrednio na podstawie testu Fishera nie można.** Test Fishera
+weryfikuje hipotezę **niezależności**:
+$P(K \cap \mathrm{kier}) = P(K)\cdot P(\mathrm{kier})$, czyli równoważnie
+$P(K\,|\,\mathrm{kier}) = P(K)$. Dopiero gdyby $P(K) = 0{,}5$, niezależność
+implikowałaby $P(K\,|\,\mathrm{kier}) = 0{,}5 = P(M\,|\,\mathrm{kier})$.
+W próbie $P(K) = `r round(mean(dane$PLEC=="K"),3)`$, a więc rozkład płci
+w populacji nie jest 1:1. Dla pytania
+"czy wśród kierowników $p_K = p_M$" stosuje się **test dla jednej
+proporcji** (dwumianowy lub $\chi^2$ z $p_0 = 0{,}5$):
+
+```{r zad4-binom}
+n_kier <- sum(dane$CZY_KIER == "Tak")
+k_K    <- sum(dane$CZY_KIER == "Tak" & dane$PLEC == "K")
+bt <- binom.test(k_K, n_kier, p = 0.5)
+bt
+```
+
+$p$-wartość dwumianowego testu `r signif(bt$p.value,3)` --- zatem
+**`r ifelse(bt$p.value<0.05,"odrzucamy","nie mamy podstaw do odrzucenia")`**
+hipotezy $P(K\,|\,\mathrm{kier})=1/2$.
+
+## Zadanie 5 — Test Freemana--Haltona
+
+Test Freemana--Haltona jest uogólnieniem testu Fishera na tablice
+$r\times c$; w `R` uzyskujemy go wywołując `fisher.test(..., simulate.p.value = TRUE)`
+(z uwagi na koszt obliczeń ścisłych dla większych tablic).
+
+```{r zad5-helper}
+FH_test <- function(x, y, B = 20000) {
+  tb <- table(x, y)
+  ft <- fisher.test(tb, simulate.p.value = TRUE, B = B)
+  list(table = tb, p_value = ft$p.value)
+}
+
+tasks <- list(
+  "a) CZY_KIER ~ WIEK_KAT" = list(dane$CZY_KIER, dane$WIEK_KAT),
+  "b) CZY_KIER ~ STAZ"     = list(dane$CZY_KIER, dane$STAZ),
+  "c) PYT_2 ~ CZY_KIER"    = list(dane$PYT_2,    dane$CZY_KIER),
+  "d) PYT_2 ~ STAZ"        = list(dane$PYT_2,    dane$STAZ),
+  "e) PYT_2 ~ PLEC"        = list(dane$PYT_2,    dane$PLEC),
+  "f) PYT_2 ~ WIEK_KAT"    = list(dane$PYT_2,    dane$WIEK_KAT),
+  "c') CZY_ZADOW ~ CZY_KIER" = list(dane$CZY_ZADOW, dane$CZY_KIER),
+  "d') CZY_ZADOW ~ STAZ"     = list(dane$CZY_ZADOW, dane$STAZ),
+  "e') CZY_ZADOW ~ PLEC"     = list(dane$CZY_ZADOW, dane$PLEC),
+  "f') CZY_ZADOW ~ WIEK_KAT" = list(dane$CZY_ZADOW, dane$WIEK_KAT)
+)
+
+set.seed(2025)
+wyniki <- sapply(tasks, function(z) FH_test(z[[1]], z[[2]])$p_value)
+tab5 <- data.frame(
+  Hipoteza    = names(wyniki),
+  `p-wartość` = signif(wyniki, 3),
+  Decyzja     = ifelse(wyniki < 0.05, "odrzucić H0", "brak podstaw"),
+  check.names = FALSE
+)
+kable(tab5, caption = "Wyniki testów Freemana-Haltona (symulacja, B = 20000).",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Opis Tabeli 5.** Kolumna *p-wartość* zawiera wartości p uzyskane symulacyjnie;
+ostatnia kolumna podaje decyzję na poziomie $\alpha = 0{,}05$.
+
+**Porównanie PYT_2 vs CZY_ZADOW.** Zmienna `PYT_2` ma 4 kategorie
+(silniejsza moc różnicująca), zaś `CZY_ZADOW` jest binarną agregacją
+`PYT_1`. Zauważmy:
+
+- dla par PYT_2 vs (CZY_KIER, STAŻ, PŁEĆ, WIEK_KAT) zróżnicowanie
+  rozkładu jest zwykle silniejsze (więcej kategorii --- więcej stopni
+  swobody, bardziej szczegółowy obraz zależności);
+- po zastąpieniu PYT_2 $\to$ CZY_ZADOW następuje agregacja i test
+  zazwyczaj traci moc (p-wartości rosną), a w zadaniu o "opiniach
+  kontekstowych" warto pozostać przy pełnej skali.
+
+## Zadanie 6 — Test $\chi^2$ niezależności: PYT_2 vs CZY_KIER
+
+```{r zad6}
+tab_62 <- table(PYT_2 = factor(dane$PYT_2, levels=c(-2,-1,1,2)),
+                CZY_KIER = dane$CZY_KIER)
+kable(addmargins(tab_62),
+      caption = "Tablica dwudzielcza PYT\\_2 x CZY\\_KIER.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+
+chi6 <- suppressWarnings(chisq.test(tab_62))
+chi6
+```
+
+P-wartość $= `r signif(chi6$p.value,3)`$. Przy $\alpha = 0{,}01$
+**`r ifelse(chi6$p.value < 0.01,"odrzucamy","nie mamy podstaw do odrzucenia")`**
+hipotezy o niezależności. Wynik jest zgodny z testem Freemana--Haltona
+w punkcie c) zadania 5.
+
+**Wykres asocjacyjny (reszty standaryzowane Pearsona)** pokazuje znak i
+wielkość wkładu każdej komórki do statystyki $\chi^2$:
+
+```{r zad6-assoc, fig.cap="Wykres asocjacyjny: wysokość prostokąta proporcjonalna do reszty standaryzowanej, kolor (niebieski = dodatnia, czerwony = ujemna) wskazuje kierunek odchylenia od niezależności."}
+assoc(tab_62, shade = TRUE, main = NULL)
+```
+
+**Opis Rysunku 2.** Prostokąty nad linią zerową (niebieskie) odpowiadają
+komórkom, w których zaobserwowano więcej przypadków niż wynikałoby z
+niezależności; pod linią (czerwone) --- komórkom z mniejszą liczebnością.
+Najsilniejsze odchylenia pojawiają się dla kategorii skrajnych PYT_2
+("zdec. tak"/"zdec. nie") w podgrupie kierowników, co sugeruje, że
+opinia na temat dopasowania szkoleń do potrzeb indywidualnych jest
+istotnie związana z zajmowanym stanowiskiem.
+
+\newpage
+
+## Zadanie 7 — Test niezależności oparty na ilorazie wiarogodności
+
+Dla tablicy $r\times c$ z liczebnościami $n_{ij}$ i sumą $n$ statystyka:
+$$
+G^2 = 2 \sum_{i,j} n_{ij} \log\!\Bigl(\frac{n_{ij}}{\hat m_{ij}}\Bigr),
+\qquad \hat m_{ij} = \frac{n_{i\cdot}\, n_{\cdot j}}{n},
+$$
+ma przy $H_0$ niezależności asymptotycznie rozkład $\chi^2_{(r-1)(c-1)}$.
+
+```{r zad7}
+LR_indep_test <- function(tab) {
+  stopifnot(all(tab >= 0))
+  n  <- sum(tab)
+  r  <- nrow(tab); c <- ncol(tab)
+  mi <- outer(rowSums(tab), colSums(tab)) / n
+  pos <- tab > 0
+  G2 <- 2 * sum(tab[pos] * log(tab[pos] / mi[pos]))
+  df <- (r - 1) * (c - 1)
+  list(statistic = G2, df = df, p_value = 1 - pchisq(G2, df))
+}
+
+lr <- LR_indep_test(tab_62)
+tab7 <- data.frame(
+  Test         = c("chi-kwadrat Pearsona (zad. 6)", "iloraz wiarogodności (NW)"),
+  Statystyka   = c(chi6$statistic, lr$statistic),
+  df           = c(chi6$parameter, lr$df),
+  `p-wartość`  = c(chi6$p.value, lr$p_value),
+  check.names  = FALSE
+)
+tab7$Statystyka <- round(tab7$Statystyka, 3)
+tab7$`p-wartość` <- signif(tab7$`p-wartość`, 3)
+kable(tab7, caption = "Porównanie testu Pearsona i testu NW dla PYT\\_2 vs CZY\\_KIER.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Opis Tabeli 7.** Asymptotycznie statystyki $\chi^2$ i $G^2$ mają ten
+sam rozkład graniczny, jednak w próbie skończonej mogą się istotnie
+różnić --- szczególnie gdy niektóre komórki mają bardzo małe liczności
+(jak PYT_2 = 1 z tylko 2 obserwacjami w całej próbie). Tutaj:
+$\chi^2 \approx `r round(chi6$statistic,2)`$ ($p \approx `r signif(chi6$p.value,2)`$),
+$G^2 \approx `r round(lr$statistic,2)`$ ($p \approx `r signif(lr$p_value,2)`$).
+Na poziomie $\alpha = 0{,}05$ oba testy prowadzą do odrzucenia $H_0$,
+**ale na poziomie $\alpha = 0{,}01$ test Pearsona odrzuca $H_0$, a test
+NW --- nie**. Rozbieżność wynika z niskiej liczności w niektórych
+komórkach (ostrzeżenie funkcji `chisq.test`); w takich przypadkach
+rekomenduje się sięgnięcie po test Fishera/Freemana--Haltona (zad. 5c),
+który zwraca p-wartość opartą na dokładnym lub symulowanym rozkładzie
+bez asymptotycznych założeń.
+
+---
+
+# Część III
+
+## Zadanie 8 — Palenie a śmiertelność (rak płuc i choroba serca)
+
+Dane (odsetki zgonów rocznie):
+
+| Choroba               | Palący $\pi_1$ | Niepalący $\pi_2$ |
+|-----------------------|---------------:|------------------:|
+| rak płuc              |        0,00140 |           0,00010 |
+| choroba niedokrwienna |        0,00669 |           0,00413 |
+
+Trzy miary związku (palenie = ekspozycja, choroba/zgon = skutek):
+
+- różnica proporcji $\Delta = \pi_1 - \pi_2$,
+- ryzyko względne $\mathrm{RR} = \pi_1/\pi_2$,
+- iloraz szans $\mathrm{OR} = \frac{\pi_1/(1-\pi_1)}{\pi_2/(1-\pi_2)}$.
+
+```{r zad8}
+miary <- function(p1, p2) {
+  diff <- p1 - p2
+  RR   <- p1 / p2
+  OR   <- (p1 / (1 - p1)) / (p2 / (1 - p2))
+  c(`π1-π2` = diff, RR = RR, OR = OR)
+}
+lung  <- miary(0.00140, 0.00010)
+heart <- miary(0.00669, 0.00413)
+
+tab8 <- rbind(`rak płuc` = lung, `choroba serca` = heart)
+tab8 <- round(tab8, 5)
+kable(tab8, caption = "Miary związku: palenie vs zgon z powodu raka płuc / choroby serca.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Interpretacja.**
+
+- **Rak płuc**: $\mathrm{RR} = 14{,}0$ oznacza, że ryzyko zgonu z powodu raka
+  płuc wśród palaczy jest **14 razy większe** niż wśród niepalących; OR
+  jest praktycznie równe RR (bo $\pi_i \ll 1$). Różnica proporcji jest
+  niewielka (0{,}0013), ale ze względu na znikomą częstość bazową ($\pi_2$
+  rzędu $10^{-4}$) wartość bezwzględna jest słabo informatywna.
+- **Choroba serca**: $\mathrm{RR} \approx 1{,}62$, $\mathrm{OR} \approx 1{,}62$.
+  Ryzyko palaczy jest o około 62\% większe. $\Delta = 0{,}00256$ --- w
+  liczbach bezwzględnych większe niż dla raka płuc (bo choroba serca jest
+  znacznie częstsza).
+
+**Siła związku.** Miary względne (RR, OR) jednoznacznie wskazują, że
+**związek palenia z rakiem płuc jest znacznie silniejszy** (RR = 14 vs
+RR $\approx 1{,}62$), choć w liczbach bezwzględnych (różnica proporcji)
+większy wpływ populacyjny wywiera zależność palenie $\to$ choroba serca.
+
+## Zadanie 9 — Współczynniki współzmienności (gamma, tau)
+
+Rozważane pary:
+
+1. PYT_2 (porządkowa) vs CZY_KIER (binarna --- dopuszczalna jako
+   porządkowa),
+2. PYT_2 vs STAŻ (obie porządkowe),
+3. CZY_KIER vs STAŻ.
+
+Współczynnik gamma Goodmana--Kruskala:
+$\gamma = (C - D)/(C + D)$, gdzie $C, D$ to liczba par zgodnych i niezgodnych.
+
+```{r zad9}
+gamma_tab <- function(tab) {
+  g <- DescTools::GoodmanKruskalGamma(tab, conf.level = 0.95)
+  tau <- DescTools::KendallTauB(tab, conf.level = 0.95)
+  c(gamma = unname(g[1]), gamma_L = unname(g[2]), gamma_U = unname(g[3]),
+    tau_b = unname(tau[1]), tau_L = unname(tau[2]), tau_U = unname(tau[3]))
+}
+
+# Kodowania porządkowe
+tab_9a <- table(dane$PYT_2,    dane$CZY_KIER)
+tab_9b <- table(dane$PYT_2,    dane$STAZ)
+tab_9c <- table(dane$CZY_KIER, dane$STAZ)
+
+tab9 <- rbind(
+  `PYT_2 vs CZY_KIER` = gamma_tab(tab_9a),
+  `PYT_2 vs STAŻ`     = gamma_tab(tab_9b),
+  `CZY_KIER vs STAŻ`  = gamma_tab(tab_9c)
+)
+tab9 <- round(tab9, 3)
+kable(tab9,
+      caption = "Goodman-Kruskal gamma i Kendall tau-b z 95\\% PU.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Opis Tabeli 9.** Wartości $\gamma \in [-1,1]$; znak wskazuje kierunek
+monotonicznej zależności, moduł jej siłę. Analogicznie dla $\tau_b$
+(skorygowane o powiązania). Interpretacja:
+
+- **PYT_2 vs CZY_KIER** --- wartość gamma odmienna od 0 świadczy o
+  zależności monotonicznej (zgodnie z testem z zad. 6),
+- **PYT_2 vs STAŻ** --- siła zależności bliska 0 sugeruje, że opinie o
+  dopasowaniu szkoleń do potrzeb nie układają się monotonicznie względem
+  stażu pracy,
+- **CZY_KIER vs STAŻ** --- zgodność kierunkowa przynależności do
+  kierownictwa ze stażem.
+
+Przedziały ufności zawierające 0 wskazują na brak istotności danej
+miary współzmienności.
+
+\newpage
+
+## Zadanie 10 — Analiza korespondencji "od zera"
+
+Analiza korespondencji (CA) to metoda graficznej eksploracji tablicy
+dwudzielczej. Niech $N$ będzie tablicą o wymiarach $r\times c$, $n = \sum n_{ij}$,
+macierz częstości względnych $P = N/n$, wektory mas $r = P\mathbf 1$,
+$c = P^\top\mathbf 1$. Macierz reszt standaryzowanych:
+$$
+S = D_r^{-1/2} (P - r c^\top) D_c^{-1/2},
+\qquad D_r = \mathrm{diag}(r),\ D_c = \mathrm{diag}(c).
+$$
+Rozkład SVD: $S = U \Sigma V^\top$. Współrzędne "principal":
+wiersze $F = D_r^{-1/2} U \Sigma$, kolumny $G = D_c^{-1/2} V \Sigma$.
+
+```{r zad10-fun}
+moja_CA <- function(N, dim = 2) {
+  N <- as.matrix(N)
+  stopifnot(all(N >= 0))
+  n <- sum(N)
+  P <- N / n
+  r <- rowSums(P); c <- colSums(P)
+  Dr_inv_half <- diag(1 / sqrt(r))
+  Dc_inv_half <- diag(1 / sqrt(c))
+  S <- Dr_inv_half %*% (P - r %o% c) %*% Dc_inv_half
+  sv <- svd(S)
+  inertia <- sv$d^2
+  Fcoord <- Dr_inv_half %*% sv$u %*% diag(sv$d)
+  Gcoord <- Dc_inv_half %*% sv$v %*% diag(sv$d)
+  rownames(Fcoord) <- rownames(N); rownames(Gcoord) <- colnames(N)
+  list(row_coords = Fcoord[, 1:dim, drop = FALSE],
+       col_coords = Gcoord[, 1:dim, drop = FALSE],
+       singular_values = sv$d,
+       inertia = inertia,
+       explained = inertia / sum(inertia),
+       r_mass = r, c_mass = c, S = S)
+}
+
+plot_CA <- function(ca, main = "Analiza korespondencji") {
+  R <- ca$row_coords; G <- ca$col_coords
+  ran <- range(c(R[,1], G[,1], R[,2], G[,2])) * 1.15
+  plot(NA, xlim = ran, ylim = ran, xlab = "Dim 1", ylab = "Dim 2",
+       main = main, asp = 1)
+  abline(h = 0, v = 0, lty = 3, col = "gray60")
+  points(R, pch = 19, col = "steelblue")
+  text(R, rownames(R), pos = 3, cex = 0.9, col = "steelblue")
+  points(G, pch = 17, col = "firebrick")
+  text(G, rownames(G), pos = 3, cex = 0.9, col = "firebrick")
+  legend("topright", legend = c("wiersze (PYT_2)", "kolumny (STAŻ)"),
+         pch = c(19,17), col = c("steelblue","firebrick"), bty = "n")
+}
+```
+
+Zastosowanie do pary PYT_2 × STAŻ:
+
+```{r zad10-apply, fig.cap="Dwuwymiarowa mapa analizy korespondencji dla PYT\\_2 (niebieski) oraz STAŻ (czerwony). Zbliżenie punktów świadczy o powiązaniu kategorii."}
+tabela_10 <- table(PYT_2 = factor(dane$PYT_2, levels=c(-2,-1,1,2),
+                                  labels = etyk_pyt2),
+                   STAZ  = factor(dane$STAZ, levels=c(1,2,3),
+                                  labels=c("staż 1","staż 2","staż 3")))
+ca <- moja_CA(tabela_10)
+
+tab10 <- data.frame(
+  Wymiar = seq_along(ca$singular_values),
+  `sigma (wart.osobl.)` = round(ca$singular_values, 4),
+  inercja = round(ca$inertia, 4),
+  `% wyjaśnionej` = round(ca$explained * 100, 2),
+  check.names = FALSE
+)
+kable(tab10, caption = "Wartości osobliwe i inercje z CA.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+
+plot_CA(ca)
+```
+
+**Opis Tabeli 10 i Rysunku 3.** Sumaryczna inercja pierwszych dwóch
+wymiarów wyjaśnia łącznie
+$`r round(sum(ca$explained[1:2])*100,1)`\%$ zróżnicowania. Na wykresie
+punkty bliskie sobie oznaczają kategorie silnie ze sobą powiązane
+(np. określony staż częściej niż losowo współwystępuje z określoną
+odpowiedzią PYT_2). Pierwsza oś zwykle oddaje główne przeciwstawienie
+opinii pozytywnej vs negatywnej, druga ujawnia niemonotoniczne
+konfiguracje.
+
+---
+
+# Zadania dodatkowe
+
+## Zadanie *1 — Test oparty na korelacji odległości (dCor)
+
+Korelacja odległości Székely--Rizzo: $\mathrm{dCor}(X,Y) = 0 \iff X \perp Y$.
+Test permutacyjny p-wartości:
+
+```{r zad-dcor}
+dcor_test <- function(x, y, R = 999) {
+  stopifnot(length(x) == length(y))
+  obs <- energy::dcor(x, y)
+  T_rep <- replicate(R, energy::dcor(x, sample(y)))
+  p_val <- (1 + sum(T_rep >= obs)) / (R + 1)
+  list(statistic = obs, p_value = p_val, R = R)
+}
+
+# Przykłady
+set.seed(2025)
+x <- rnorm(200); y1 <- rnorm(200); y2 <- x^2 + rnorm(200, sd = 0.1)
+
+t1 <- dcor_test(x, y1)     # niezależne
+t2 <- dcor_test(x, y2)     # zależność nieliniowa
+
+rbind(independent = unlist(t1),
+      nonlinear   = unlist(t2)) |>
+  round(4) |>
+  kable(caption = "Test niezależności oparty na dCor (999 permutacji).",
+        booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Opis Tabeli \*1.** Dla niezależnych $X, Y_1$ dCor jest bliski 0 i p-wartość
+duża. Dla zależności nieliniowej $Y_2 = X^2$ (której Pearson nie wykrywa),
+dCor wykrywa silną zależność (p-wartość $\ll 0{,}05$).
+
+## Zadanie *2 — $|\mathrm{RR} - 1| \le |\mathrm{OR} - 1|$ (RR bliżej 1 niż OR)
+
+Dla $\pi_1, \pi_2 \in (0,1)$:
+$$
+\mathrm{OR} - 1 = \frac{\pi_1(1 - \pi_2) - \pi_2(1 - \pi_1)}{\pi_2(1-\pi_1)}
+               = \frac{\pi_1 - \pi_2}{\pi_2(1-\pi_1)},
+$$
+$$
+\mathrm{RR} - 1 = \frac{\pi_1 - \pi_2}{\pi_2}.
+$$
+Stosunek:
+$$
+\frac{\mathrm{OR} - 1}{\mathrm{RR} - 1} = \frac{1}{1 - \pi_1} \ge 1,
+$$
+ponieważ $1-\pi_1 \in (0,1]$. Ponadto oba wyrażenia mają ten sam znak (wyznacznik
+$\pi_1 - \pi_2$). Stąd:
+$$
+|\mathrm{OR} - 1| \ge |\mathrm{RR} - 1|,
+$$
+co oznacza, że **RR nie jest bardziej oddalone od 1 niż OR**; równość
+zachodzi dla $\pi_1 \to 0$.
+
+Ilustracja numeryczna:
+
+```{r zad-gwiazdka2}
+pi1 <- seq(0.01, 0.9, by = 0.05)
+pi2 <- 0.1
+OR <- (pi1*(1-pi2))/(pi2*(1-pi1))
+RR <- pi1/pi2
+data.frame(pi1, RR, OR,
+           `|RR-1|` = abs(RR-1), `|OR-1|` = abs(OR-1),
+           check.names = FALSE) |>
+  head(6) |> round(3) |>
+  kable(caption = "Ilustracja: |OR-1| >= |RR-1|.", booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+## Zadanie *3 — Ryzyko przypisane (attributable risk)
+
+**(a)** $\mathrm{AR} = [P(D) - P(D|E')]/P(D)$ --- jest to
+**frakcja zachorowań w populacji, którą można przypisać ekspozycji $E$**.
+Licznik to przyrost ryzyka w populacji względem scenariusza, w którym
+nikt nie jest eksponowany ($P(D|E')$). Dzieląc przez $P(D)$ otrzymujemy
+udział w całkowitej chorobowości.
+
+**(b)** Ze wzoru na prawdopodobieństwo całkowite:
+$$
+P(D) = P(E)P(D|E) + P(E')P(D|E').
+$$
+Oznaczmy $\pi_E = P(D|E),\ \pi_{E'}=P(D|E'),\ q = P(E)$. Wtedy
+$P(D) = q\pi_E + (1-q)\pi_{E'}$, skąd:
+$$
+P(D) - P(D|E') = q(\pi_E - \pi_{E'})
+= q\,\pi_{E'}\,(\mathrm{RR} - 1),\qquad \mathrm{RR} = \pi_E/\pi_{E'}.
+$$
+Dzieląc przez $P(D) = \pi_{E'}(1 + q(\mathrm{RR}-1))$:
+$$
+\mathrm{AR}
+= \frac{q\,\pi_{E'}(\mathrm{RR}-1)}{\pi_{E'}\bigl(1 + q(\mathrm{RR}-1)\bigr)}
+= \frac{P(E)(\mathrm{RR}-1)}{1 + P(E)(\mathrm{RR}-1)},
+$$
+co kończy dowód. $\blacksquare$
+
+---
+
+# Podsumowanie
+
+- Jednoczesne 95\% PU dla wektora prawdopodobieństw odpowiedzi na PYT_1
+  wskazują na zdecydowaną dominację kategorii "zadowolony".
+- Napisana funkcja `p_value_multinom()` pozwala sprawnie testować
+  hipotezy o dopasowaniu do rozkładu $p_0$; rozkład odpowiedzi PYT_1
+  w dziale PD nie jest równomierny.
+- Dla par zmiennych PYT_2 × CZY_KIER wyniki testów Fishera/Freemana--Haltona,
+  $\chi^2$ Pearsona oraz NW są zgodne: istnieje istotna zależność.
+  Agregacja PYT_2 do CZY_ZADOW zwykle osłabia moc testu.
+- Związek palenia z rakiem płuc jest znacznie silniejszy (RR $\approx 14$)
+  niż z chorobą serca (RR $\approx 1{,}62$).
+- Współczynniki gamma/tau oraz mapa CA dostarczają narzędzi eksploracyjnych
+  zgodnych z wynikami testów formalnych.
