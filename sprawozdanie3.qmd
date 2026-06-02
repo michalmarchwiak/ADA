@@ -1,0 +1,573 @@
+---
+title: "Analiza Danych Ankietowych — Sprawozdanie 3"
+author: "Michał Marchwiak 276003, Weronika Mitulska 277475"
+date: today
+lang: pl
+format:
+  pdf:
+    pdf-engine: xelatex
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    documentclass: article
+    geometry:
+      - margin=2.2cm
+    fontsize: 11pt
+    fig-width: 6.5
+    fig-height: 4.2
+    fig-align: center
+    include-in-header:
+      text: |
+        \usepackage{polyglossia}
+        \setdefaultlanguage{polish}
+        \usepackage{booktabs}
+        \usepackage{float}
+        \usepackage{amsmath, amssymb}
+execute:
+  echo: false
+  warning: false
+  message: false
+  cache: false
+knitr:
+  opts_chunk:
+    comment: "#>"
+    collapse: true
+    dev: "ragg_png"
+    dpi: 300
+---
+
+```{r setup, include=FALSE}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(knitr)
+  library(kableExtra)
+  library(MASS)        # loglin / loglm
+  library(vcd)         # mosaic
+})
+
+set.seed(2025)
+
+# Wczytanie danych (CSV, separator ';', kodowanie UTF-8)
+dane <- read.csv2("ankieta.csv", stringsAsFactors = FALSE, fileEncoding = "UTF-8")
+colnames(dane) <- c("DZIAL","STAZ","CZY_KIER","PYT_1","PYT_2","PYT_3","PLEC","WIEK")
+
+# Zmienne pomocnicze wykorzystywane w kilku zadaniach
+dane$CZY_KIER <- factor(dane$CZY_KIER, levels = c("Nie","Tak"))
+dane$PYT_2f   <- factor(dane$PYT_2, levels = c(-2,-1,1,2))
+dane$STAZf    <- factor(dane$STAZ,  levels = c(1,2,3),
+                        labels = c("<1 rok","1-3 lata",">3 lata"))
+
+# Zmienne "zadowolenia ze szkoleń" w dwóch okresach (zadanie 3).
+# PYT_2 -> pierwszy okres, PYT_3 -> drugi okres; obie zmienne nie
+# przyjmują wartości 0, więc binaryzacja względem zera jest jednoznaczna:
+# odpowiedź dodatnia (1,2) = "Tak" (zadowolony), ujemna (-2,-1) = "Nie".
+dane$CZY_ZADW   <- factor(ifelse(dane$PYT_2 > 0, "Tak", "Nie"), levels = c("Nie","Tak"))
+dane$CZY_ZADW_2 <- factor(ifelse(dane$PYT_3 > 0, "Tak", "Nie"), levels = c("Nie","Tak"))
+```
+
+# Wprowadzenie
+
+Sprawozdanie dotyczy testów symetrii w tablicach kwadratowych, paradoksu
+Simpsona oraz modeli log-liniowych. Część obliczeń wykorzystuje dane z
+pierwszej listy zadań (ankieta pracownicza, $n = 200$, działy IT, HR, MK,
+PD), część — dane podane bezpośrednio w treści zadań.
+
+Przyjęte konwencje kodowania zmiennych ankietowych:
+
+- **CZY\_KIER** — czy pracownik zajmuje stanowisko kierownicze (Nie/Tak);
+- **PYT\_2** — odpowiedź na pytanie 2 w skali porządkowej $\{-2,-1,1,2\}$
+  (w danych nie występuje wartość 0);
+- **STAŻ** — staż pracy w trzech kategoriach: `1 = <1 rok`,
+  `2 = 1–3 lata`, `3 = >3 lata`;
+- **CZY\_ZADW**, **CZY\_ZADW\_2** — zadowolenie ze szkoleń odpowiednio
+  w pierwszym i drugim badanym okresie. Zmienne zdefiniowano jako binaryzację
+  pytań `PYT_2` oraz `PYT_3` względem zera (odpowiedź dodatnia $\Rightarrow$
+  „Tak”, ujemna $\Rightarrow$ „Nie”); ponieważ żadne z tych pytań nie
+  przyjmuje wartości 0, podział jest jednoznaczny.
+
+Wszystkie obliczenia wykonano w R; ziarno losowe ustawiono na `set.seed(2025)`.
+
+---
+
+# Część I
+
+## Zadanie 1 — Warunkowy test symetrii dla tablicy $2\times2$
+
+Dla tablicy $2\times2$ z liczebnościami $n_{ij}$ hipoteza symetrii sprowadza
+się do $H_0:\ p_{12} = p_{21}$ (komórki na przekątnej nie wpływają na test).
+W **teście warunkowym** rozumujemy warunkowo względem sumy liczebności
+pozaprzekątniowych $m = n_{12} + n_{21}$. Przy $H_0$ każda z $m$ obserwacji
+„niezgodnych” trafia do komórki $(1,2)$ z prawdopodobieństwem $\tfrac12$,
+zatem
+$$
+n_{12} \mid m \ \sim\ \mathrm{Bin}\!\left(m,\tfrac12\right).
+$$
+Dwustronną p-wartość wyznaczamy podwajając mniejszy z ogonów rozkładu
+dwumianowego:
+$$
+p = \min\!\Bigl\{1,\ 2\!\!\sum_{j=0}^{\min(n_{12},n_{21})}\binom{m}{j}\Bigl(\tfrac12\Bigr)^{m}\Bigr\}.
+$$
+
+```{r zad1, echo=TRUE}
+# Warunkowy (dokładny) test symetrii dla tablicy 2x2.
+# Zwraca dwustronną p-wartość opartą na rozkładzie Bin(m, 1/2).
+p_warunkowy <- function(n12, n21) {
+  m <- n12 + n21
+  if (m == 0) return(1)
+  k <- min(n12, n21)
+  min(1, 2 * pbinom(k, size = m, prob = 0.5))
+}
+```
+
+Test ten jest dokładnym (warunkowym) odpowiednikiem testu McNemara; nie
+korzysta z przybliżenia rozkładem $\chi^2$, więc jest poprawny także przy
+małych liczebnościach.
+
+## Zadanie 2 — Skuteczność dwóch leków przeciwbólowych
+
+Dane (reakcja na lek po godzinie; ten sam pacjent dla obu leków):
+
+```{r zad2-tab}
+M <- matrix(c(1,5,2,4), nrow = 2, byrow = TRUE,
+            dimnames = list("Lek A" = c("Negatywna","Pozytywna"),
+                            "Lek B" = c("Negatywna","Pozytywna")))
+kable(addmargins(M), caption = "Reakcja na lek A (wiersze) vs lek B (kolumny).",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+Liczebności pozaprzekątniowe: $n_{12} = 5$ (negatywna na A, pozytywna na B)
+oraz $n_{21} = 2$ (pozytywna na A, negatywna na B). Hipoteza
+$H_0$: leki są jednakowo skuteczne ($p_{12} = p_{21}$).
+
+```{r zad2-test}
+mcc <- mcnemar.test(M, correct = TRUE)
+pw  <- p_warunkowy(5, 2)
+tab_z2 <- data.frame(
+  Test         = c("McNemar (z poprawką na ciągłość)", "warunkowy (zad. 1)"),
+  Statystyka   = c(round(unname(mcc$statistic), 4), NA),
+  `p-wartość`  = c(signif(mcc$p.value, 4), signif(pw, 4)),
+  check.names  = FALSE
+)
+kable(tab_z2, caption = "Weryfikacja hipotezy o jednakowej skuteczności leków.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Wyniki.** Test McNemara z poprawką na ciągłość daje statystykę
+$\chi^2 = (|5-2|-1)^2/(5+2) = 4/7 \approx 0{,}571$ ($p \approx 0{,}450$). Test
+warunkowy zwraca $p = 2\cdot\mathrm{Bin}(X\le 2;\,7,\,0{,}5) \approx 0{,}453$.
+Obie p-wartości są niemal identyczne i znacznie większe od $0{,}05$.
+
+**Wniosek.** Brak podstaw do odrzucenia $H_0$ — dane nie dają dowodu na to,
+że leki różnią się skutecznością. Mała próba ($m = 7$ niezgodnych par)
+oznacza zarazem niewielką moc testu.
+
+## Zadanie 3 — Symetria zadowolenia ze szkoleń w dwóch okresach
+
+Na podstawie zmiennych `CZY_ZADW` (okres 1) i `CZY_ZADW_2` (okres 2)
+budujemy tablicę $2\times2$ i testujemy model symetrii.
+
+```{r zad3}
+t3 <- table(`Okres 1 (CZY_ZADW)` = dane$CZY_ZADW,
+            `Okres 2 (CZY_ZADW_2)` = dane$CZY_ZADW_2)
+kable(addmargins(t3),
+      caption = "Zadowolenie ze szkoleń: okres 1 (wiersze) vs okres 2 (kolumny).",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+
+mcc3 <- mcnemar.test(t3, correct = TRUE)
+n12 <- t3["Nie","Tak"]; n21 <- t3["Tak","Nie"]
+pw3 <- p_warunkowy(n12, n21)
+tab_z3 <- data.frame(
+  Test        = c("McNemar (z poprawką na ciągłość)", "warunkowy (zad. 1)"),
+  Statystyka  = c(round(unname(mcc3$statistic), 4), NA),
+  `p-wartość` = c(signif(mcc3$p.value, 4), signif(pw3, 4)),
+  check.names = FALSE
+)
+kable(tab_z3, caption = "Test symetrii dla zadowolenia ze szkoleń.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+```{r zad3-plot, fig.cap="Liczba pracowników zmieniających status zadowolenia między okresami. Komórki pozaprzekątniowe (Nie$\\to$Tak oraz Tak$\\to$Nie) decydują o teście symetrii."}
+df3 <- as.data.frame(t3)
+colnames(df3) <- c("Okres1","Okres2","n")
+ggplot(df3, aes(Okres1, Okres2, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 5) +
+  scale_fill_gradient(low = "grey90", high = "steelblue") +
+  labs(x = "Okres 1 (CZY_ZADW)", y = "Okres 2 (CZY_ZADW_2)", fill = "Liczba") +
+  theme_minimal(base_size = 11)
+```
+
+**Wyniki.** Wśród par niezgodnych $n_{12} = 20$ pracowników zmieniło status
+z „Nie” na „Tak”, a jedynie $n_{21} = 8$ z „Tak” na „Nie”. Test McNemara z
+poprawką daje $\chi^2 \approx 4{,}32$ ($p \approx 0{,}038$), a test warunkowy
+$p \approx 0{,}036$. Obie p-wartości są mniejsze niż $\alpha = 0{,}05$.
+
+**Wniosek.** **Odrzucamy** hipotezę symetrii. Oznacza to, że rozkład
+zadowolenia w dwóch okresach **nie** odpowiada modelowi symetrii — a zatem
+**poziom zadowolenia ze szkoleń uległ zmianie**. Kierunek przepływów
+(20 przejść na „Tak” wobec 8 na „Nie”) wskazuje na **wzrost** odsetka
+zadowolonych w drugim okresie.
+
+\newpage
+
+## Zadanie 4 — Symetria odpowiedzi (tablica $5\times5$, test Bowkera)
+
+Dane z Tabeli 2 (pytanie 1 vs pytanie 2 w obu okresach):
+
+```{r zad4-tab}
+T2 <- matrix(c(10, 2, 1, 1, 0,
+                0,15, 1, 1, 0,
+                1, 1,32, 6, 0,
+                0, 0, 1,96, 3,
+                1, 1, 0, 1,26),
+             nrow = 5, byrow = TRUE,
+             dimnames = list("Pytanie 1" = c("-2","-1","0","1","2"),
+                             "Pytanie 2" = c("-2","-1","0","1","2")))
+kable(T2, caption = "Tablica 5x5 odpowiedzi w dwóch okresach (Tabela 2).",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+Dla tablicy $k\times k$ uogólnieniem testu McNemara jest **test Bowkera**:
+$$
+\chi^2_B = \sum_{i<j} \frac{(n_{ij}-n_{ji})^2}{n_{ij}+n_{ji}},
+$$
+z liczbą stopni swobody równą liczbie par $(i,j),\ i<j$.
+
+```{r zad4-test}
+# Bowker liczony ręcznie: pary z n_ij + n_ji = 0 są pomijane (0/0),
+# co zmniejsza efektywną liczbę stopni swobody.
+k <- nrow(T2); bow <- 0; df_eff <- 0; zero_pairs <- c()
+for (i in 1:(k-1)) for (j in (i+1):k) {
+  s <- T2[i,j] + T2[j,i]
+  if (s > 0) { bow <- bow + (T2[i,j]-T2[j,i])^2 / s; df_eff <- df_eff + 1 }
+  else zero_pairs <- c(zero_pairs, paste0("(",i,",",j,")"))
+}
+df_nom <- k*(k-1)/2
+tab_z4 <- data.frame(
+  Wariant      = c("df nominalne = 10", "df efektywne = 9 (po usunięciu par 0/0)"),
+  Statystyka   = round(bow, 4),
+  df           = c(df_nom, df_eff),
+  `p-wartość`  = c(signif(1-pchisq(bow, df_nom), 4), signif(1-pchisq(bow, df_eff), 4)),
+  check.names  = FALSE
+)
+kable(tab_z4, caption = "Test Bowkera symetrii dla tablicy 5x5.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Problem z zerami.** Para kategorii $(0,2)$, tj. komórki $(3,5)$ i $(5,3)$,
+ma $n_{35}+n_{53} = 0+0 = 0$, co prowadzi do dzielenia $0/0$ (funkcja
+`mcnemar.test` zwraca wówczas `NaN`). Para ta wnosi zerowy wkład do
+statystyki, dlatego pomijamy ją w sumie i zmniejszamy liczbę stopni swobody
+do $9$ (problem omówiony szerzej w zadaniu dodatkowym 1\*).
+
+**Wyniki.** $\chi^2_B \approx 10{,}57$. Przy $\mathrm{df}=9$ otrzymujemy
+$p \approx 0{,}306$, a przy nominalnym $\mathrm{df}=10$ — $p \approx 0{,}392$.
+W obu przypadkach $p > 0{,}05$.
+
+**Wniosek.** Brak podstaw do odrzucenia hipotezy symetrii — odpowiedzi w
+obu okresach odpowiadają modelowi symetrii. Wobec tego **nie ma dowodu na
+zmianę oceny podejścia firmy**: ocena w pierwszym i drugim okresie jest
+statystycznie nieodróżnialna pod względem symetrii rozkładu.
+
+\newpage
+
+# Część II
+
+## Zadanie 5 — Paradoks Simpsona
+
+Porównujemy skuteczność leczenia A (nowa procedura) i B (stara procedura)
+na całej grupie oraz w podgrupach względem występowania chorób
+współistniejących.
+
+```{r zad5}
+skutecz <- function(popr, brak) popr / (popr + brak)
+orf <- function(a, b, c, d) (a*d)/(b*c)   # iloraz szans (poprawa A:B)
+
+tab5 <- data.frame(
+  Grupa = c("Cała grupa", "Z chorobami współist.", "Bez chorób współist."),
+  `Poprawa A` = c(117, 17, 100),
+  `Poprawa B` = c(177, 2, 175),
+  `% popr. A` = round(100*c(skutecz(117,104), skutecz(17,101), skutecz(100,3)), 1),
+  `% popr. B` = round(100*c(skutecz(177,44),  skutecz(2,36),   skutecz(175,8)), 1),
+  `OR (A:B)`  = round(c(orf(117,104,177,44), orf(17,101,2,36), orf(100,3,175,8)), 2),
+  check.names = FALSE
+)
+kable(tab5, caption = "Odsetek poprawy i iloraz szans dla leczenia A vs B.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+```{r zad5-plot, fig.cap="Odsetek poprawy w metodach A i B: dla całej grupy lepsza wydaje się metoda B, ale w obu podgrupach lepsza jest metoda A — odwrócenie kierunku świadczy o paradoksie Simpsona."}
+dfp <- tab5 |>
+  dplyr::select(Grupa, `% popr. A`, `% popr. B`) |>
+  tidyr::pivot_longer(-Grupa, names_to = "Metoda", values_to = "proc")
+dfp$Metoda <- ifelse(dfp$Metoda == "% popr. A", "Leczenie A", "Leczenie B")
+dfp$Grupa <- factor(dfp$Grupa,
+                    levels = c("Cała grupa","Z chorobami współist.","Bez chorób współist."))
+ggplot(dfp, aes(Grupa, proc, fill = Metoda)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_text(aes(label = paste0(proc,"%")),
+            position = position_dodge(width = 0.7), vjust = -0.3, size = 3.4) +
+  scale_fill_manual(values = c("Leczenie A" = "steelblue", "Leczenie B" = "firebrick")) +
+  labs(x = NULL, y = "Odsetek poprawy [%]") +
+  ylim(0, 105) +
+  theme_minimal(base_size = 11)
+```
+
+**Wyniki.** Dla **całej grupy** lepsza okazuje się metoda B
+(80,1\% vs 52,9\% poprawy; $\mathrm{OR} = 0{,}28 < 1$, czyli szanse
+poprawy są mniejsze przy A). Jednak **w obu podgrupach to metoda A jest
+lepsza**: u pacjentów z chorobami współistniejącymi 14,4\% vs 5,3\%
+($\mathrm{OR} = 3{,}03$), a u pacjentów bez chorób — 97,1\% vs 95,6\%
+($\mathrm{OR} = 1{,}52$).
+
+**Wniosek.** **Tak, występuje paradoks Simpsona** — kierunek zależności
+odwraca się po uwzględnieniu zmiennej zakłócającej (choroby współistniejące).
+Przyczyną jest nierównomierne rozłożenie ryzyka: metodę A częściej stosowano
+u trudniejszych pacjentów (z chorobami współistniejącymi: 118 vs 38 osób),
+co pogorszyło jej zagregowany wynik. Właściwą oceną skuteczności jest analiza
+w podgrupach, która wskazuje na przewagę metody A.
+
+\newpage
+
+## Zadanie 6 — Interpretacja modeli log-liniowych
+
+Przyjmujemy: zmienna **1 = CZY\_KIER**, **2 = PYT\_2**, **3 = STAŻ**.
+Niech $\pi_{ijk}$ oznacza prawdopodobieństwo komórki $(i,j,k)$. Notacja
+nawiasowa wskazuje najwyższe (zachowane) składniki interakcyjne modelu
+hierarchicznego.
+
+```{r zad6-tab}
+z6 <- data.frame(
+  Model = c("$[1\\ 3]$", "$[13]$", "$[1\\ 2\\ 3]$",
+            "$[12\\ 3]$", "$[12\\ 13]$", "$[1\\ 23]$"),
+  Postac = c(
+    "$\\pi_{i\\cdot k}=\\pi_{i\\cdot\\cdot}\\,\\pi_{\\cdot\\cdot k}$",
+    "$\\pi_{i\\cdot k}$ dowolne",
+    "$\\pi_{i\\cdot\\cdot}\\,\\pi_{\\cdot j\\cdot}\\,\\pi_{\\cdot\\cdot k}$",
+    "$\\pi_{ij\\cdot}\\,\\pi_{\\cdot\\cdot k}$",
+    "$\\pi_{ij\\cdot}\\,\\pi_{i\\cdot k}/\\pi_{i\\cdot\\cdot}$",
+    "$\\pi_{i\\cdot\\cdot}\\,\\pi_{\\cdot jk}$"),
+  Interpretacja = c(
+    "\\textbf{Niezależność CZY\\_KIER i STAŻ} (model dla pary 1--3, z pominięciem zmiennej 2). Stanowisko nie zależy od stażu.",
+    "\\textbf{Model nasycony dla pary 1--3} --- dopuszcza dowolną zależność (asocjację) między CZY\\_KIER a STAŻ.",
+    "\\textbf{Wzajemna (całkowita) niezależność} wszystkich trzech zmiennych.",
+    "\\textbf{STAŻ niezależny od pary (CZY\\_KIER, PYT\\_2)}; zmienne 1 i 2 mogą być powiązane.",
+    "\\textbf{PYT\\_2 i STAŻ warunkowo niezależne przy ustalonym CZY\\_KIER} (zmienna 1 jest wspólnym rdzeniem).",
+    "\\textbf{CZY\\_KIER niezależny od pary (PYT\\_2, STAŻ)}; zmienne 2 i 3 mogą być powiązane."),
+  check.names = FALSE
+)
+kbl(z6, format = "latex", booktabs = TRUE, escape = FALSE,
+    col.names = c("Model", "Postać $\\pi_{ijk}$", "Interpretacja"),
+    caption = "Interpretacja modeli log-liniowych (1 = CZY\\_KIER, 2 = PYT\\_2, 3 = STAŻ).") |>
+  kable_styling(latex_options = c("HOLD_position"), full_width = FALSE) |>
+  column_spec(1, width = "1.5cm") |>
+  column_spec(2, width = "3cm") |>
+  column_spec(3, width = "9.5cm")
+```
+
+**Komentarz.** Modele $[1\ 3]$ i $[13]$ dotyczą tablicy dwuwymiarowej
+(zmienne 1 i 3): pierwszy zakłada niezależność, drugi jest nasycony.
+Modele trójwymiarowe układają się od najbardziej restrykcyjnego
+(całkowita niezależność $[1\ 2\ 3]$), przez niezależność jednej zmiennej od
+pary pozostałych ($[12\ 3]$, $[1\ 23]$), po niezależność warunkową
+($[12\ 13]$, w której obecność wspólnej zmiennej dopuszcza zależność z nią obu
+pozostałych, ale nie między nimi nawzajem).
+
+## Zadanie 7 — Estymacja prawdopodobieństw (modele $[123]$ i $[12\ 23]$)
+
+```{r zad7}
+tab3w <- table(CZY_KIER = dane$CZY_KIER, PYT_2 = dane$PYT_2f, STAZ = dane$STAZf)
+
+# Model nasycony [123] = częstości empiryczne
+P_sat <- tab3w / sum(tab3w)
+p1_sat <- sum(P_sat["Tak","2",]) / sum(P_sat["Tak",,])    # P(PYT_2=2 | kier)
+p2_sat <- sum(P_sat[,, "<1 rok"]["Tak",]) / sum(P_sat[,, "<1 rok"]) # P(kier | staż<1)
+p3_sat <- sum(P_sat[,, ">3 lata"]["Nie",]) / sum(P_sat[,, ">3 lata"]) # P(nie kier | staż>3)
+
+# Model [12 23]: 1 i 3 warunkowo niezależne przy ustalonym 2
+m1223 <- loglin(tab3w, list(c(1,2), c(2,3)), fit = TRUE, print = FALSE)
+Pf <- m1223$fit / sum(m1223$fit)
+p1_m <- sum(Pf["Tak","2",]) / sum(Pf["Tak",,])
+p2_m <- sum(Pf[,, "<1 rok"]["Tak",]) / sum(Pf[,, "<1 rok"])
+p3_m <- sum(Pf[,, ">3 lata"]["Nie",]) / sum(Pf[,, ">3 lata"])
+
+tab7 <- data.frame(
+  Prawdopodobieństwo = c(
+    "$P(\\text{PYT\\_2}{=}2 \\mid \\text{kierownik})$",
+    "$P(\\text{kierownik} \\mid \\text{staż} < 1\\text{ rok})$",
+    "$P(\\text{nie kierownik} \\mid \\text{staż} > 3\\text{ lata})$"),
+  `Model [123]`    = round(c(p1_sat, p2_sat, p3_sat), 4),
+  `Model [12 23]`  = round(c(p1_m, p2_m, p3_m), 4),
+  check.names = FALSE
+)
+kbl(tab7, format = "latex", booktabs = TRUE, escape = FALSE,
+    caption = "Oszacowania prawdopodobieństw w modelu nasyconym i [12 23].") |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Wyniki (model nasycony $[123]$ = częstości empiryczne).**
+
+- $P(\text{PYT\_2}=2 \mid \text{kierownik}) \approx 0{,}481$ — prawie połowa
+  kierowników jest zdecydowanie zadowolona ze szkoleń;
+- $P(\text{kierownik} \mid \text{staż}<1\text{ rok}) \approx 0{,}024$ — wśród
+  najmłodszych stażem niemal nikt nie jest kierownikiem;
+- $P(\text{nie kierownik} \mid \text{staż}>3\text{ lata}) \approx 0{,}526$.
+
+**Wyniki (model $[12\ 23]$).** Pierwsze prawdopodobieństwo pozostaje takie
+samo ($\approx 0{,}481$), ponieważ model $[12\ 23]$ zachowuje pełną zależność
+pary (CZY\_KIER, PYT\_2). Pozostałe dwa zmieniają się, bo zależność
+CZY\_KIER–STAŻ jest teraz „filtrowana” przez PYT\_2 (warunkowa niezależność
+1 i 3 przy ustalonym 2): $P(\text{kier}\mid\text{staż}<1) \approx 0{,}128$
+oraz $P(\text{nie kier}\mid\text{staż}>3) \approx 0{,}778$. Model wygładza
+skrajne oszacowania empiryczne, „pożyczając” informację między warstwami
+zmiennej PYT\_2.
+
+\newpage
+
+## Zadanie 8 — Weryfikacja hipotez niezależności (modele log-liniowe)
+
+Każdą hipotezę weryfikujemy jako dopasowanie odpowiedniego modelu
+log-liniowego względem modelu nasyconego. Statystyka ilorazu wiarogodności
+$G^2$ (dewiancja) ma przy $H_0$ rozkład $\chi^2$ o liczbie stopni swobody
+równej różnicy liczby parametrów.
+
+```{r zad8}
+df8 <- as.data.frame(tab3w)
+m_mut  <- glm(Freq ~ CZY_KIER + PYT_2 + STAZ,            family = poisson, data = df8)  # [1 2 3]
+m_jnt  <- glm(Freq ~ CZY_KIER*STAZ + PYT_2,              family = poisson, data = df8)  # [2 13]
+m_cnd  <- glm(Freq ~ CZY_KIER*STAZ + PYT_2*STAZ,         family = poisson, data = df8)  # [13 23]
+
+g2 <- function(m) c(round(m$deviance,3), m$df.residual, signif(1-pchisq(m$deviance,m$df.residual),4))
+tab8 <- data.frame(
+  Hipoteza = c("CZY_KIER, PYT_2, STAŻ wzajemnie niezależne",
+               "PYT_2 niezależna od pary (CZY_KIER, STAŻ)",
+               "PYT_2 niezależna od CZY_KIER przy ustalonym STAŻ"),
+  Model    = c("[1 2 3]", "[2 13]", "[13 23]"),
+  `G²`     = c(g2(m_mut)[1], g2(m_jnt)[1], g2(m_cnd)[1]),
+  df       = c(g2(m_mut)[2], g2(m_jnt)[2], g2(m_cnd)[2]),
+  `p-wartość` = c(g2(m_mut)[3], g2(m_jnt)[3], g2(m_cnd)[3]),
+  check.names = FALSE
+)
+kable(tab8, caption = "Testy ilorazu wiarogodności dla hipotez niezależności.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Wyniki i wnioski** (poziom istotności $\alpha = 0{,}05$):
+
+1. **Wzajemna niezależność** $[1\ 2\ 3]$: $G^2 \approx 42{,}24$,
+   $\mathrm{df}=17$, $p \approx 0{,}0006 < 0{,}05$ — **odrzucamy** $H_0$.
+   Zmienne CZY\_KIER, PYT\_2 i STAŻ **nie są** wzajemnie niezależne.
+2. **PYT\_2 niezależna od pary (CZY\_KIER, STAŻ)** $[2\ 13]$:
+   $G^2 \approx 23{,}15$, $\mathrm{df}=15$, $p \approx 0{,}081 > 0{,}05$ —
+   **brak podstaw do odrzucenia** $H_0$ (wynik jest jednak na granicy
+   istotności). Można przyjąć, że zadowolenie PYT\_2 nie zależy od łącznego
+   układu stanowiska i stażu.
+3. **PYT\_2 niezależna od CZY\_KIER przy ustalonym STAŻ** $[13\ 23]$:
+   $G^2 \approx 4{,}88$, $\mathrm{df}=9$, $p \approx 0{,}845 > 0{,}05$ —
+   **brak podstaw do odrzucenia** $H_0$. Po uwzględnieniu stażu zadowolenie
+   ze szkoleń nie zależy już od zajmowanego stanowiska.
+
+```{r zad8-plot, fig.height=5, fig.cap="Rozkład odpowiedzi PYT\\_2 w warstwach wyznaczonych przez staż (kolumny) oraz stanowisko kierownicze (wiersze). Każdy panel ma własną skalę osi pionowej (kierownicy są nieliczni)."}
+df8plot <- as.data.frame(tab3w)
+df8plot$CZY_KIER <- factor(df8plot$CZY_KIER, levels = c("Nie","Tak"),
+                           labels = c("Nie kierownik", "Kierownik"))
+ggplot(df8plot, aes(x = PYT_2, y = Freq, fill = PYT_2)) +
+  geom_col(show.legend = FALSE, width = 0.75) +
+  geom_text(aes(label = Freq), vjust = -0.3, size = 2.7) +
+  facet_grid(CZY_KIER ~ STAZ, scales = "free_y") +
+  scale_fill_brewer(palette = "RdYlBu") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  labs(x = "PYT_2 (odpowiedź)", y = "Liczba obserwacji") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold"))
+```
+
+**Opis Rysunku 4.** Wykres przedstawia rozkład odpowiedzi PYT\_2 w sześciu
+warstwach (3 kategorie stażu $\times$ 2 poziomy stanowiska). Kształt rozkładu
+PYT\_2 jest podobny w poszczególnych warstwach (przewaga odpowiedzi
+pozytywnych), co jest spójne z brakiem odrzucenia hipotez 2 i 3. Jednocześnie
+widać silną zależność CZY\_KIER–STAŻ: kierownicy występują niemal wyłącznie
+przy dłuższym stażu (panel „Kierownik" dla stażu `<1 rok` jest niemal pusty),
+co tłumaczy odrzucenie hipotezy o wzajemnej niezależności.
+
+\newpage
+
+# Zadania dodatkowe
+
+## Zadanie 1\* — Dokładny test symetrii dla tablicy z zerami
+
+W zadaniu 4 test Bowkera napotyka problem: para komórek $(0,2)$ ma
+$n_{35}+n_{53}=0$, więc składnik $\tfrac{(n_{ij}-n_{ji})^2}{n_{ij}+n_{ji}}$
+jest postaci $0/0$. Rozwiązaniem jest **dokładny (warunkowy) test symetrii**.
+
+**Idea.** Przy hipotezie symetrii $\pi_{ij}=\pi_{ji}$ rozumujemy warunkowo
+względem sum par pozaprzekątniowych $m_{ij}=n_{ij}+n_{ji}$. Dla każdej pary
+$(i<j)$ liczebność $n_{ij}\mid m_{ij}\sim\mathrm{Bin}(m_{ij},\tfrac12)$,
+a poszczególne pary są (warunkowo) niezależne. Statystyką może być np.
+$T=\sum_{i<j}(n_{ij}-n_{ji})^2/(n_{ij}+n_{ji})$ (Bowker) lub suma odchyleń.
+
+**Wyznaczanie poziomu krytycznego.** P-wartość to prawdopodobieństwo, że
+przy $H_0$ statystyka osiągnie wartość co najmniej tak skrajną jak
+obserwowana. Wyznacza się je **sumując po wszystkich konfiguracjach**
+$\{n_{ij}': n_{ij}'+n_{ji}'=m_{ij}\}$ ich łączne prawdopodobieństwo
+dwumianowe (iloczyn po parach), uwzględniając tylko te układy, dla których
+wartość statystyki $\ge$ wartości obserwowanej. Pary z $m_{ij}=0$ są
+**pomijane** (nie wnoszą losowości), co naturalnie usuwa problem $0/0$.
+Poniżej szacujemy tę p-wartość metodą Monte Carlo.
+
+```{r zad1gw}
+exact_sym_mc <- function(T2, B = 20000) {
+  k <- nrow(T2)
+  pairs <- which(upper.tri(T2), arr.ind = TRUE)
+  m  <- T2[cbind(pairs[,1], pairs[,2])] + T2[cbind(pairs[,2], pairs[,1])]
+  nij <- T2[cbind(pairs[,1], pairs[,2])]
+  use <- m > 0
+  Tobs <- sum((2*nij[use] - m[use])^2 / m[use])   # = suma (n_ij - n_ji)^2/(n_ij+n_ji)
+  cnt <- 0
+  for (b in 1:B) {
+    sim <- rbinom(sum(use), m[use], 0.5)
+    Tsim <- sum((2*sim - m[use])^2 / m[use])
+    if (Tsim >= Tobs - 1e-9) cnt <- cnt + 1
+  }
+  list(T = Tobs, p = (cnt + 1)/(B + 1), df_eff = sum(use))
+}
+set.seed(2025)
+es <- exact_sym_mc(T2)
+```
+
+Dokładny (symulowany, $B=20000$) test symetrii daje
+$T \approx `r round(es$T,3)`$ oraz p-wartość $\approx `r signif(es$p,3)`$ —
+zgodnie z testem Bowkera p-wartość znacznie przekracza $0{,}05$, więc **nie
+ma podstaw do odrzucenia hipotezy symetrii**. Test dokładny jest tu
+poprawniejszy, bo nie wymaga przybliżenia $\chi^2$ ani niezerowych sum par.
+
+---
+
+# Podsumowanie
+
+- **Zad. 1–2.** Warunkowy test symetrii dla tablicy $2\times2$ to dokładny
+  odpowiednik testu McNemara ($n_{12}\mid m\sim\mathrm{Bin}(m,\tfrac12)$).
+  Dla leków przeciwbólowych ($p\approx0{,}45$) brak dowodu na różną
+  skuteczność.
+- **Zad. 3.** Zadowolenie ze szkoleń **zmieniło się** między okresami
+  ($p\approx0{,}036$) — istotnie więcej osób stało się zadowolonych.
+- **Zad. 4.** Ocena podejścia firmy **nie uległa zmianie** — test Bowkera
+  ($p\approx0{,}31$) nie odrzuca symetrii (problem zer rozwiązany w zad. 1\*).
+- **Zad. 5.** W danych o leczeniu **występuje paradoks Simpsona**: metoda B
+  wygrywa w agregacie, lecz metoda A jest lepsza w obu podgrupach.
+- **Zad. 6–7.** Podano interpretacje sześciu modeli log-liniowych oraz
+  oszacowano prawdopodobieństwa w modelu nasyconym i $[12\ 23]$.
+- **Zad. 8.** Zmienne CZY\_KIER, PYT\_2, STAŻ **nie są** wzajemnie niezależne;
+  natomiast PYT\_2 jest (warunkowo) niezależna od CZY\_KIER przy ustalonym
+  stażu ($p\approx0{,}85$).
