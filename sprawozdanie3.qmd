@@ -43,8 +43,6 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(knitr)
   library(kableExtra)
-  library(MASS)        # loglin / loglm
-  library(vcd)         # mosaic
 })
 
 set.seed(2025)
@@ -133,7 +131,9 @@ Dane (reakcja na lek po godzinie; ten sam pacjent dla obu leków):
 M <- matrix(c(1,5,2,4), nrow = 2, byrow = TRUE,
             dimnames = list("Lek A" = c("Negatywna","Pozytywna"),
                             "Lek B" = c("Negatywna","Pozytywna")))
-kable(addmargins(M), caption = "Reakcja na lek A (wiersze) vs lek B (kolumny).",
+M_marg <- addmargins(M)
+rownames(M_marg)[3] <- colnames(M_marg)[3] <- "Suma"
+kable(M_marg, caption = "Reakcja na lek A (wiersze) vs lek B (kolumny).",
       booktabs = TRUE) |>
   kable_styling(latex_options = c("HOLD_position"))
 ```
@@ -147,7 +147,7 @@ mcc <- mcnemar.test(M, correct = TRUE)
 pw  <- p_warunkowy(5, 2)
 tab_z2 <- data.frame(
   Test         = c("McNemar (z poprawką na ciągłość)", "warunkowy (zad. 1)"),
-  Statystyka   = c(round(unname(mcc$statistic), 4), NA),
+  Statystyka   = c(sprintf("%.4f", unname(mcc$statistic)), "---"),
   `p-wartość`  = c(signif(mcc$p.value, 4), signif(pw, 4)),
   check.names  = FALSE
 )
@@ -173,7 +173,9 @@ budujemy tablicę $2\times2$ i testujemy model symetrii.
 ```{r zad3}
 t3 <- table(`Okres 1 (CZY_ZADW)` = dane$CZY_ZADW,
             `Okres 2 (CZY_ZADW_2)` = dane$CZY_ZADW_2)
-kable(addmargins(t3),
+t3_marg <- addmargins(t3)
+rownames(t3_marg)[3] <- colnames(t3_marg)[3] <- "Suma"
+kable(t3_marg,
       caption = "Zadowolenie ze szkoleń: okres 1 (wiersze) vs okres 2 (kolumny).",
       booktabs = TRUE) |>
   kable_styling(latex_options = c("HOLD_position"))
@@ -183,7 +185,7 @@ n12 <- t3["Nie","Tak"]; n21 <- t3["Tak","Nie"]
 pw3 <- p_warunkowy(n12, n21)
 tab_z3 <- data.frame(
   Test        = c("McNemar (z poprawką na ciągłość)", "warunkowy (zad. 1)"),
-  Statystyka  = c(round(unname(mcc3$statistic), 4), NA),
+  Statystyka  = c(sprintf("%.4f", unname(mcc3$statistic)), "---"),
   `p-wartość` = c(signif(mcc3$p.value, 4), signif(pw3, 4)),
   check.names = FALSE
 )
@@ -218,7 +220,9 @@ zadowolonych w drugim okresie.
 
 ## Zadanie 4 — Symetria odpowiedzi (tablica $5\times5$, test Bowkera)
 
-Dane z Tabeli 2 (pytanie 1 vs pytanie 2 w obu okresach):
+Dane z Tabeli 2 z treści zadania — odpowiedzi na to samo pytanie (ocena
+podejścia firmy) udzielone przez $n = 200$ pracowników w pierwszym
+(wiersze) i drugim (kolumny) okresie badania:
 
 ```{r zad4-tab}
 T2 <- matrix(c(10, 2, 1, 1, 0,
@@ -227,9 +231,9 @@ T2 <- matrix(c(10, 2, 1, 1, 0,
                 0, 0, 1,96, 3,
                 1, 1, 0, 1,26),
              nrow = 5, byrow = TRUE,
-             dimnames = list("Pytanie 1" = c("-2","-1","0","1","2"),
-                             "Pytanie 2" = c("-2","-1","0","1","2")))
-kable(T2, caption = "Tablica 5x5 odpowiedzi w dwóch okresach (Tabela 2).",
+             dimnames = list("Okres 1" = c("-2","-1","0","1","2"),
+                             "Okres 2" = c("-2","-1","0","1","2")))
+kable(T2, caption = "Odpowiedzi w okresie 1 (wiersze) vs okresie 2 (kolumny).",
       booktabs = TRUE) |>
   kable_styling(latex_options = c("HOLD_position"))
 ```
@@ -243,11 +247,10 @@ z liczbą stopni swobody równą liczbie par $(i,j),\ i<j$.
 ```{r zad4-test}
 # Bowker liczony ręcznie: pary z n_ij + n_ji = 0 są pomijane (0/0),
 # co zmniejsza efektywną liczbę stopni swobody.
-k <- nrow(T2); bow <- 0; df_eff <- 0; zero_pairs <- c()
+k <- nrow(T2); bow <- 0; df_eff <- 0
 for (i in 1:(k-1)) for (j in (i+1):k) {
   s <- T2[i,j] + T2[j,i]
   if (s > 0) { bow <- bow + (T2[i,j]-T2[j,i])^2 / s; df_eff <- df_eff + 1 }
-  else zero_pairs <- c(zero_pairs, paste0("(",i,",",j,")"))
 }
 df_nom <- k*(k-1)/2
 tab_z4 <- data.frame(
@@ -257,7 +260,7 @@ tab_z4 <- data.frame(
   `p-wartość`  = c(signif(1-pchisq(bow, df_nom), 4), signif(1-pchisq(bow, df_eff), 4)),
   check.names  = FALSE
 )
-kable(tab_z4, caption = "Test Bowkera symetrii dla tablicy 5x5.",
+kable(tab_z4, caption = "Test Bowkera symetrii dla tablicy 5×5.",
       booktabs = TRUE) |>
   kable_styling(latex_options = c("HOLD_position"))
 ```
@@ -272,10 +275,11 @@ do $9$ (problem omówiony szerzej w zadaniu dodatkowym 1\*).
 $p \approx 0{,}306$, a przy nominalnym $\mathrm{df}=10$ — $p \approx 0{,}392$.
 W obu przypadkach $p > 0{,}05$.
 
-**Wniosek.** Brak podstaw do odrzucenia hipotezy symetrii — odpowiedzi w
-obu okresach odpowiadają modelowi symetrii. Wobec tego **nie ma dowodu na
-zmianę oceny podejścia firmy**: ocena w pierwszym i drugim okresie jest
-statystycznie nieodróżnialna pod względem symetrii rozkładu.
+**Wniosek.** Brak podstaw do odrzucenia hipotezy symetrii — rozkład
+odpowiedzi w obu okresach jest zgodny z modelem symetrii. Wobec tego
+**nie ma dowodu na zmianę oceny podejścia firmy**: odpowiedzi w pierwszym
+i drugim okresie są statystycznie nieodróżnialne pod względem symetrii
+rozkładu.
 
 \newpage
 
@@ -293,14 +297,14 @@ orf <- function(a, b, c, d) (a*d)/(b*c)   # iloraz szans (poprawa A:B)
 
 tab5 <- data.frame(
   Grupa = c("Cała grupa", "Z chorobami współist.", "Bez chorób współist."),
-  `Poprawa A` = c(117, 17, 100),
-  `Poprawa B` = c(177, 2, 175),
+  `Poprawa A` = c("117/221", "17/118", "100/103"),
+  `Poprawa B` = c("177/221", "2/38",   "175/183"),
   `% popr. A` = round(100*c(skutecz(117,104), skutecz(17,101), skutecz(100,3)), 1),
   `% popr. B` = round(100*c(skutecz(177,44),  skutecz(2,36),   skutecz(175,8)), 1),
   `OR (A:B)`  = round(c(orf(117,104,177,44), orf(17,101,2,36), orf(100,3,175,8)), 2),
   check.names = FALSE
 )
-kable(tab5, caption = "Odsetek poprawy i iloraz szans dla leczenia A vs B.",
+kable(tab5, caption = "Liczba pacjentów z poprawą, odsetek poprawy i iloraz szans dla leczenia A vs B.",
       booktabs = TRUE) |>
   kable_styling(latex_options = c("HOLD_position"))
 ```
@@ -332,11 +336,10 @@ lepsza**: u pacjentów z chorobami współistniejącymi 14,4\% vs 5,3\%
 **Wniosek.** **Tak, występuje paradoks Simpsona** — kierunek zależności
 odwraca się po uwzględnieniu zmiennej zakłócającej (choroby współistniejące).
 Przyczyną jest nierównomierne rozłożenie ryzyka: metodę A częściej stosowano
-u trudniejszych pacjentów (z chorobami współistniejącymi: 118 vs 38 osób),
-co pogorszyło jej zagregowany wynik. Właściwą oceną skuteczności jest analiza
+u trudniejszych pacjentów (choroby współistniejące miało 118 z 221 leczonych
+metodą A wobec 38 z 221 leczonych metodą B), co pogorszyło jej zagregowany
+wynik. Właściwą oceną skuteczności jest analiza
 w podgrupach, która wskazuje na przewagę metody A.
-
-\newpage
 
 ## Zadanie 6 — Interpretacja modeli log-liniowych
 
@@ -431,8 +434,6 @@ oraz $P(\text{nie kier}\mid\text{staż}>3) \approx 0{,}778$. Model wygładza
 skrajne oszacowania empiryczne, „pożyczając” informację między warstwami
 zmiennej PYT\_2.
 
-\newpage
-
 ## Zadanie 8 — Weryfikacja hipotez niezależności (modele log-liniowe)
 
 Każdą hipotezę weryfikujemy jako dopasowanie odpowiedniego modelu
@@ -493,7 +494,7 @@ ggplot(df8plot, aes(x = PYT_2, y = Freq, fill = PYT_2)) +
         strip.text = element_text(face = "bold"))
 ```
 
-**Opis Rysunku 4.** Wykres przedstawia rozkład odpowiedzi PYT\_2 w sześciu
+**Komentarz do wykresu.** Wykres przedstawia rozkład odpowiedzi PYT\_2 w sześciu
 warstwach (3 kategorie stażu $\times$ 2 poziomy stanowiska). Kształt rozkładu
 PYT\_2 jest podobny w poszczególnych warstwach (przewaga odpowiedzi
 pozytywnych), co jest spójne z brakiem odrzucenia hipotez 2 i 3. Jednocześnie
