@@ -1,69 +1,91 @@
-# Survey Data Analysis Reports
+# Analiza Danych Ankietowych (ADA)
 
-This repository contains Quarto statistical reports analyzing employee survey data. The reports were written for a university statistics course and cover descriptive analysis, interval estimation, hypothesis testing, contingency tables, and log-linear models.
+Repozytorium zawiera sprawozdania statystyczne z analizy ankiety pracowniczej dotyczącej programów szkoleniowych. Materiały przygotowano w ramach zajęć z analizy danych.
 
-## Files
+## Struktura repozytorium
 
-| Polish source | English translation |
-|---------------|---------------------|
-| `sprawo1.qmd` | `report1.qmd` |
-| `sprawozdanie2.qmd` | `report2.qmd` |
-| `sprawozdanie3.qmd` | `report3.qmd` |
+| Plik | Opis |
+|------|------|
+| `sprawo1.qmd` | Sprawozdanie 1 — analiza opisowa, tablice krzyżowe, przedziały ufności, testy |
+| `sprawozdanie2.qmd` | Sprawozdanie 2 — testy χ², Fishera, współczynniki asocjacji, analiza korespondencji |
+| `sprawozdanie3.qmd` | Sprawozdanie 3 — testy symetrii, paradoks Simpsona, modele log-liniowe |
+| `notebooks/sprawozdanie1.ipynb` | Jupyter — wersja interaktywna sprawozdania 1 |
+| `notebooks/sprawozdanie2.ipynb` | Jupyter — wersja interaktywna sprawozdania 2 |
+| `notebooks/sprawozdanie3.ipynb` | Jupyter — wersja interaktywna sprawozdania 3 |
+| `ankieta.csv` | Dane ankietowe (n = 200, separator `;`, UTF-8) |
+| `scripts/` | Skrypty pomocnicze (generowanie danych, wykresów, konwersja notebooków) |
 
-The Polish `.qmd` files are the originals. The English `report*.qmd` files are generated copies with translated narrative text, section headings, table captions, and comments. R code, variable names, and factor levels such as `Tak` / `Nie` are kept unchanged because they match the underlying data.
+## Podgląd wyników
 
-## Report overview
+Poniższe wykresy pochodzą z analizy opisowej danych ankietowych (zmienne `PYT_1`, `PYT_2`, podział na działy).
 
-- **Report 1** — Descriptive survey analysis, cross-tabulations, Clopper–Pearson confidence intervals, proportion tests, and Monte Carlo power simulation.
-- **Report 2** — Multinomial confidence intervals, chi-square tests, Fisher / Freeman–Halton tests, association measures, correspondence analysis, and distance correlation.
-- **Report 3** — Symmetry tests (McNemar, Bowker), Simpson's paradox, and log-linear models.
+### Rozkład odpowiedzi PYT_1
 
-## Requirements
+Pytanie o dostępność materiałów szkoleniowych (skala Likerta):
 
-- [Quarto](https://quarto.org/)
-- R (≥ 4.x) with packages used in the reports, including: `tidyverse`, `knitr`, `kableExtra`, `scales`, `gridExtra`, `binom`, and others as referenced in each document
-- LaTeX with LuaLaTeX (PDF output)
-- Survey data file `ankieta.csv` (UTF-8, `;` separator) in the project directory when rendering Report 1–3
+![Rozkład odpowiedzi PYT_1](docs/images/pyt1_distribution.png)
 
-## Rendering
+### Struktura próby według działu
 
-Render a single report:
+![Liczności w działach](docs/images/department_counts.png)
+
+### Profil odpowiedzi PYT_1 w podziale na działy
+
+![PYT_1 według działu](docs/images/pyt1_by_department.png)
+
+### Rozkład odpowiedzi PYT_2
+
+Pytanie o dopasowanie szkoleń do możliwości awansu:
+
+![Wykres kołowy PYT_2](docs/images/pyt2_pie.png)
+
+## Wymagania
+
+- [Quarto](https://quarto.org/) — renderowanie plików `.qmd` do PDF
+- [Jupyter](https://jupyter.org/) z jądrem [IRkernel](https://github.com/IRkernel/IRkernel) — uruchamianie notebooków
+- R (≥ 4.x) z pakietami: `tidyverse`, `knitr`, `kableExtra`, `scales`, `gridExtra`, `binom` i innymi wskazanymi w dokumentach
+- LaTeX z LuaLaTeX (dla PDF z Quarto)
+
+## Renderowanie sprawozdań (Quarto)
 
 ```bash
-quarto render report1.qmd
-quarto render report2.qmd
-quarto render report3.qmd
+quarto render sprawo1.qmd
+quarto render sprawozdanie2.qmd
+quarto render sprawozdanie3.qmd
 ```
 
-Render all English reports:
+## Uruchamianie notebooków Jupyter
 
 ```bash
-quarto render report1.qmd report2.qmd report3.qmd
+# Wygeneruj dane, jeśli brak pliku ankieta.csv
+Rscript scripts/generate_ankieta.R
+
+# Uruchom Jupyter
+jupyter notebook notebooks/
 ```
 
-Polish originals can be rendered the same way, for example `quarto render sprawo1.qmd`.
+Notebooki generuje skrypt `scripts/qmd_to_ipynb.py` (konwersja chunków R i Markdown z plików `.qmd`).
 
-## Regenerating English translations
-
-English reports are produced from the Polish sources by a small Python script:
+## Regeneracja wykresów w README
 
 ```bash
-python3 scripts/translate_reports.py
+Rscript scripts/generate_readme_figures.R
 ```
 
-The script reads `sprawo1.qmd`, `sprawozdanie2.qmd`, and `sprawozdanie3.qmd`, applies paragraph-level and phrase-level replacements, sets `lang: en`, and writes `report1.qmd`, `report2.qmd`, and `report3.qmd`.
+Wykresy zapisywane są w katalogu `docs/images/`.
 
-Translation dictionaries live in:
+## Regeneracja notebooków z Quarto
 
-- `scripts/translate_reports.py` — main mappings and report-specific strings
-- `scripts/translations_pass2.py` — long prose paragraphs (reports 1–2)
-- `scripts/translations_pass2_r3.py` — long prose paragraphs (report 3)
-- `scripts/translations_fixup.py` — additional phrase-level fixes
+Po edycji plików `.qmd`:
 
-After editing Polish sources or translation dictionaries, rerun the script and review the generated English files before committing.
+```bash
+python3 scripts/qmd_to_ipynb.py
+```
 
-## Notes
+Alternatywnie można użyć `quarto convert`, ale zalecana jest konwersja powyższym skryptem — zachowuje on wszystkie komórki kodu R.
 
-- Author names in the YAML header are unchanged.
-- Reports 2 and 3 assume variables and conventions introduced in Report 1 (for example `CZY_ZADOW`, `WIEK_KAT`).
-- Random seed `set.seed(2025)` is used for simulation-based tests.
+## Uwagi
+
+- W kodzie R zachowano oryginalne nazwy zmiennych i poziomy faktorów (`Tak`/`Nie`, `K`/`M`).
+- Sprawozdania 2 i 3 korzystają ze zmiennych zdefiniowanych w sprawozdaniu 1 (np. `CZY_ZADOW`, `WIEK_KAT`).
+- Ziarno losowe `set.seed(2025)` stosowane jest w testach symulacyjnych.
