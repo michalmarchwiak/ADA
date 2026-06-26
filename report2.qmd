@@ -1,0 +1,701 @@
+---
+title: "Survey Data Analysis — Report 2"
+author: "Michał Marchwiak 276003 Weronika Mitulska 277475"
+date: today
+lang: en
+format:
+  pdf:
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    documentclass: article
+    geometry:
+      - margin=2.2cm
+    fontsize: 11pt
+    fig-width: 6.5
+    fig-height: 4.2
+    fig-align: center
+    include-in-header:
+      text: |
+        
+        \usepackage{booktabs}
+        \usepackage{float}
+        \usepackage{amsmath, amssymb}
+execute:
+  echo: false
+  warning: false
+  message: false
+  cache: false
+knitr:
+  opts_chunk:
+    comment: "#>"
+    collapse: true
+---
+
+```{r setup, include=FALSE}
+# Libraries
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(knitr)
+  library(kableExtra)
+  library(DescTools)    # gamma, Kendall tau-b, MultinomCI (Sison-Glaz)
+  library(vcd)          # assoc plot
+  library(energy)       # dcor (task *1)
+})
+
+set.seed(2025)
+
+# Load data (CSV in UTF-8, separator ';')
+dane <- read.csv2("ankieta.csv", stringsAsFactors = FALSE, fileEncoding = "UTF-8")
+colnames(dane) <- c("DZIAL","STAZ","CZY_KIER","PYT_1","PYT_2","PYT_3","PLEC","WIEK")
+
+# Age categorization: 4 groups
+dane$WIEK_KAT <- cut(dane$WIEK,
+                     breaks = c(-Inf, 35, 45, 55, Inf),
+                     labels = c("up to 35", "36-45", "46-55", "over 55"),
+                     right  = TRUE)
+
+# CZY_ZADOW variable defined in report 1:
+# employee satisfied (Tak) when PYT_1 > 0, dissatisfied (Nie) otherwise.
+dane$CZY_ZADOW <- factor(ifelse(dane$PYT_1 > 0, "Tak", "Nie"),
+                         levels = c("Nie","Tak"))
+
+# Ordered response scales (needed for gamma/tau)
+dane$PYT_1_ord <- factor(dane$PYT_1, levels = c(-2,-1,0,1,2), ordered = TRUE)
+dane$PYT_2_ord <- factor(dane$PYT_2, levels = c(-2,-1,1,2),   ordered = TRUE)
+dane$STAZ_ord  <- factor(dane$STAZ,  levels = c(1,2,3),       ordered = TRUE)
+
+# Labels
+etyk_pyt1 <- c("very dissat.", "dissat.", "no opinion", "sat.", "very sat.")
+etyk_pyt2 <- c("str. disagree","disagree","agree","str. agree")
+```
+
+# Introduction
+
+This report continues report 1 on the employee survey
+(n = 200, simple random sampling with replacement, four departments: IT, HR, MK, PD).
+Variable conventions from the previous report are preserved, in particular
+the binary variable `CZY_ZADOW` (Tak if `PYT_1 > 0`) and the
+`WIEK_KAT` variable categorizing age into four groups:
+`up to 35`, `36--45`, `46--55`, `over 55`.
+
+All computations were performed in R. The random seed was set to `set.seed(2025)`
+(for simulation-based tests, including Freeman--Halton).
+
+---
+
+# Part I
+
+## Task 1 — Confidence interval for a probability vector
+
+Niech $X = (X_1,\dots,X_5) \sim \mathrm{Multinom}(n,p)$, gdzie
+$p = (p_1,\dots,p_5)$ is the probability vector odpowiedzi
+"very dissat.", "dissat.", "no opinion", "sat.", "very sat.".
+The estimator is $\hat p_i = X_i/n$.
+
+**Simultaneous confidence interval at level $1-\alpha$** is obtained by two
+classical methods:
+
+- **Goodman (1965)** — based on inverted $\chi^2$ with Bonferroni correction
+  (quantile $\chi^2_{1,\,\alpha/k}$, where $k$ = number of categories). For each
+  component:
+  $$
+  p_i \in \frac{A + 2 X_i \pm \sqrt{A\,(A + 4 X_i(n-X_i)/n)}}{2(n+A)},\qquad A = \chi^2_{1,\alpha/k}.
+  $$
+
+- **Sison, Glaz (1995)** — equal-width interval
+  $\hat p_i \pm d$, where $d$ is chosen numerically so that
+  simultaneous coverage is $\ge 1-\alpha$.
+
+```{r zad1}
+# Data from the task statement
+x  <- c(14, 17, 40, 100, 29)
+n  <- sum(x)
+p_hat <- x / n
+alpha <- 0.05
+k  <- length(x)
+
+# --- (a) Goodman (Bonferroni + inverted chi^2_1) ---
+goodman_ci <- function(x, alpha = 0.05) {
+  n <- sum(x); k <- length(x)
+  A <- qchisq(1 - alpha/k, df = 1)
+  low <- (A + 2*x - sqrt(A*(A + 4*x*(n - x)/n))) / (2*(n + A))
+  up  <- (A + 2*x + sqrt(A*(A + 4*x*(n - x)/n))) / (2*(n + A))
+  cbind(lower = low, upper = up)
+}
+ci_g <- goodman_ci(x, alpha)
+
+# --- (b) Sison-Glaz (DescTools::MultinomCI) ---
+ci_sg_full <- DescTools::MultinomCI(x, conf.level = 1 - alpha, method = "sisonglaz")
+ci_sg <- ci_sg_full[, c("lwr.ci", "upr.ci")]
+
+tab1 <- data.frame(
+  Category   = etyk_pyt1,
+  Count  = x,
+  `p_hat`     = round(p_hat, 4),
+  `Goodman_L` = round(ci_g[,1], 4),
+  `Goodman_U` = round(ci_g[,2], 4),
+  `SG_L`      = round(ci_sg[,1], 4),
+  `SG_U`      = round(ci_sg[,2], 4),
+  check.names = FALSE
+)
+kable(tab1, caption = "Confidence intervals 95\\% dla p — metody Goodmana i Sison-Glaz.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Table description 1.** Column `p_hat` gives the MLE; subsequent column pairs contain lower and upper bounds of simultaneous 95% CIs. Sison--Glaz intervals are noticeably narrower than Goodman's (S--G is equal-width at the cost of asymptotic accuracy), but substantive conclusions agree: the "satisfied" category dominates ($p_4 \in [0.4133, 0.5906]$ Goodman, $[0.4305,0.5705]$ S--G), while extremely dissatisfied categories ($p_1, p_2$) have probabilities of a few percent with intervals disjoint from the dominant category.
+
+```{r zad1-plot, fig.cap="Point estimates $\\hat p_i$ (points) and simultaneous 95\\% CIs by Goodman (solid) and Sison-Glaz (dashed)."}
+df_pl <- data.frame(
+  kat = factor(etyk_pyt1, levels = etyk_pyt1),
+  p_hat = p_hat,
+  gL = ci_g[,1], gU = ci_g[,2],
+  sL = ci_sg[,1], sU = ci_sg[,2]
+)
+ggplot(df_pl, aes(x = kat, y = p_hat)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = gL, ymax = gU), width = 0.18) +
+  geom_errorbar(aes(ymin = sL, ymax = sU), width = 0.32, linetype = 2) +
+  labs(x = "Response category", y = expression(hat(p))) +
+  theme_minimal(base_size = 11)
+```
+
+**Figure description 1.** Estimates rise monotonically from the most negative category to "satisfied" and dip slightly for "very satisfied". Goodman CIs are wider for low-count categories (asymptotic effect of inverted $\chi^2_1$).
+
+\newpage
+
+## Task 2 — p-value function in $\chi^2$ tests for $H_0: p = p_0$
+
+Dla obserwacji $x = (x_1,\dots,x_k)$ wektora $X \sim \mathrm{Multinom}(n,p)$
+testujemy $H_0: p = p_0$. Statystyki:
+
+$$
+T_{\mathrm{P}}(x) = \sum_{i=1}^{k} \frac{(x_i - n p_{0i})^2}{n p_{0i}},
+\qquad
+T_{\mathrm{NW}}(x) = 2 \sum_{i=1}^{k} x_i \log\!\Bigl(\frac{x_i}{n p_{0i}}\Bigr).
+$$
+
+Przy $H_0$ obie statystyki are asymptotically distributed as $\chi^2_{k-1}$,
+zatem p-value $= 1 - F_{\chi^2_{k-1}}(T_\cdot(x))$.
+
+```{r zad2}
+# Pearson chi-square and LR test for H0: p = p0
+p_value_multinom <- function(x, p0,
+                             method = c("pearson", "LR"),
+                             exact = FALSE, B = 10000) {
+  method <- match.arg(method)
+  stopifnot(abs(sum(p0) - 1) < 1e-10, length(x) == length(p0), all(x >= 0))
+  n <- sum(x); k <- length(x); np0 <- n * p0
+
+  stat <- if (method == "pearson") {
+    sum((x - np0)^2 / np0)
+  } else {
+    # konwencja 0 log 0 = 0
+    pos <- x > 0
+    2 * sum(x[pos] * log(x[pos] / np0[pos]))
+  }
+  df <- k - 1
+  pval_asym <- 1 - pchisq(stat, df = df)
+
+  # optional Monte Carlo p-value
+  pval_mc <- NA_real_
+  if (exact) {
+    T_obs <- stat
+    T_rep <- replicate(B, {
+      xr <- as.numeric(rmultinom(1, n, p0))
+      if (method == "pearson") sum((xr - np0)^2 / np0)
+      else {
+        pos <- xr > 0
+        2 * sum(xr[pos] * log(xr[pos] / np0[pos]))
+      }
+    })
+    pval_mc <- mean(T_rep >= T_obs)
+  }
+  list(statistic = stat, df = df,
+       p_value = pval_asym, p_value_MC = pval_mc,
+       method = method)
+}
+```
+
+The function returns the statistic, degrees of freedom, and asymptotic
+p-value (and optionally an exact Monte Carlo value with globally set seed).
+
+## Task 3 — PYT_1 response distribution in the Product Department (PD)
+
+Hypothesis $H_0: p = p_0 = (\tfrac15,\dots,\tfrac15)$ (uniform distribution
+na 5 kategoriach), $\alpha = 0{,}05$.
+
+```{r zad3}
+pd <- dane[dane$DZIAL == "PD", ]
+tab_pd <- table(factor(pd$PYT_1, levels = c(-2,-1,0,1,2)))
+x_pd <- as.numeric(tab_pd)
+p0 <- rep(1/5, 5)
+
+tab2 <- data.frame(
+  Category  = etyk_pyt1,
+  Count = x_pd,
+  `p_hat`    = round(x_pd/sum(x_pd), 3),
+  `np0`      = sum(x_pd)/5,
+  check.names = FALSE
+)
+kable(tab2, caption = "Observed counts PYT\\_1 w dziale PD vs. expected under uniformity.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+
+res_P  <- p_value_multinom(x_pd, p0, method = "pearson")
+res_LR <- p_value_multinom(x_pd, p0, method = "LR")
+
+tab3 <- data.frame(
+  Test         = c("Pearson chi-square","LR chi-square"),
+  Statistic   = c(res_P$statistic, res_LR$statistic),
+  df           = c(res_P$df, res_LR$df),
+  `p-value`  = c(res_P$p_value, res_LR$p_value),
+  check.names  = FALSE
+)
+tab3$Statistic <- round(tab3$Statistic, 3)
+tab3$`p-value` <- signif(tab3$`p-value`, 3)
+kable(tab3, caption = "Test results H0: distribution of PYT\\_1 w dziale PD is uniform.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Tables description 2--3.** Table 2 shows a clearly non-uniform response distribution: "satisfied" (`PYT_1 = 1`) dominates, and observed counts differ greatly from expected $np_{0i} = 98/5 = 19.6$. In Table 3 both test statistics are large and p-values are well below $\alpha = 0.05$.
+
+**Conclusion.** We reject $H_0$. The PYT_1 response distribution in the Product Department is not uniform — PD employees give positive responses significantly more often than uniformity would imply.
+
+\newpage
+
+# Part II
+
+## Task 4 — Fisher test: GENDER vs CZY_KIER
+
+```{r zad4}
+tab_pk <- table(dane$PLEC, dane$CZY_KIER)
+kable(addmargins(tab_pk), caption = "Two-way table GENDER x CZY\\_KIER.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+
+ft <- fisher.test(tab_pk)
+ft
+```
+
+**Interpretation.** $p$-value $= `r signif(ft$p.value,3)`$.
+Przy poziomie $\alpha = 0.05$ **`r ifelse(ft$p.value < 0.05,"reject","we do not reject")`**
+null hypothesis of independence between GENDER and CZY_KIER. Odds ratio estimate is `r round(ft$estimate,3)` (95% PU:
+`r round(ft$conf.int[1],3)`--`r round(ft$conf.int[2],3)`).
+
+**Can we infer that $P(K\,|\,\mathrm{mgr}) = P(M\,|\,\mathrm{mgr})$?**
+
+**No, not directly from Fisher's test.** Fisher's test checks **independence**:
+$P(K \cap \mathrm{mgr}) = P(K)\cdot P(\mathrm{mgr})$, equivalently
+$P(K\,|\,\mathrm{mgr}) = P(K)$. Only if $P(K) = 0.5$ would independence imply
+$P(K\,|\,\mathrm{mgr}) = 0.5 = P(M\,|\,\mathrm{mgr})$.
+In the sample $P(K) = `r round(mean(dane$PLEC=="K"),3)`$, so the gender distribution
+is not 1:1. For "among managers, is $p_K = p_M$?" use a **single-proportion test**
+(binomial or $\chi^2$ with $p_0 = 0.5$):
+
+```{r zad4-binom}
+n_kier <- sum(dane$CZY_KIER == "Tak")
+k_K    <- sum(dane$CZY_KIER == "Tak" & dane$PLEC == "K")
+bt <- binom.test(k_K, n_kier, p = 0.5)
+bt
+```
+
+$p$-value binomial test `r signif(bt$p.value,3)` — therefore
+**`r ifelse(bt$p.value<0.05,"reject","we do not reject")`**
+hipotezy $P(K\,|\,\mathrm{kier})=1/2$.
+
+## Task 5 — Freeman--Halton test
+
+The Freeman--Halton test generalizes Fisher's test to $r\times c$ tables; in `R` use `fisher.test(..., simulate.p.value = TRUE)`
+(because exact computation is costly for larger tables).
+
+```{r zad5-helper}
+FH_test <- function(x, y, B = 20000) {
+  tb <- table(x, y)
+  ft <- fisher.test(tb, simulate.p.value = TRUE, B = B)
+  list(table = tb, p_value = ft$p.value)
+}
+
+tasks <- list(
+  "a) CZY_KIER ~ WIEK_KAT" = list(dane$CZY_KIER, dane$WIEK_KAT),
+  "b) CZY_KIER ~ STAZ"     = list(dane$CZY_KIER, dane$STAZ),
+  "c) PYT_2 ~ CZY_KIER"    = list(dane$PYT_2,    dane$CZY_KIER),
+  "d) PYT_2 ~ STAZ"        = list(dane$PYT_2,    dane$STAZ),
+  "e) PYT_2 ~ PLEC"        = list(dane$PYT_2,    dane$PLEC),
+  "f) PYT_2 ~ WIEK_KAT"    = list(dane$PYT_2,    dane$WIEK_KAT),
+  "c') CZY_ZADOW ~ CZY_KIER" = list(dane$CZY_ZADOW, dane$CZY_KIER),
+  "d') CZY_ZADOW ~ STAZ"     = list(dane$CZY_ZADOW, dane$STAZ),
+  "e') CZY_ZADOW ~ PLEC"     = list(dane$CZY_ZADOW, dane$PLEC),
+  "f') CZY_ZADOW ~ WIEK_KAT" = list(dane$CZY_ZADOW, dane$WIEK_KAT)
+)
+
+set.seed(2025)
+wyniki <- sapply(tasks, function(z) FH_test(z[[1]], z[[2]])$p_value)
+tab5 <- data.frame(
+  Hypothesis    = names(wyniki),
+  `p-value` = signif(wyniki, 3),
+  Decision     = ifelse(wyniki < 0.05, "reject H0", "insufficient evidence"),
+  check.names = FALSE
+)
+kable(tab5, caption = "Freeman-Halton test results (simulation, B = 20000).,
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Table description 5.** The *p-value* column contains simulation-based p-values;
+the last column gives the decision at $\alpha = 0.05$.
+
+**Comparison PYT_2 vs CZY_ZADOW.** `PYT_2` has 4 categories
+(stronger discriminating power), while `CZY_ZADOW` is a binary aggregation of
+`PYT_1`. Note:
+
+- for PYT_2 vs (CZY_KIER, TENURE, GENDER, WIEK_KAT) distribution differentiation is usually stronger (more categories — more degrees of freedom, finer dependence picture);
+- replacing PYT_2 with CZY_ZADOW aggregates categories and the test usually loses power (p-values rise); for contextual opinions, the full scale is preferable.
+
+## Task 6 — $\chi^2$ independence test: PYT_2 vs CZY_KIER
+
+```{r zad6}
+tab_62 <- table(PYT_2 = factor(dane$PYT_2, levels=c(-2,-1,1,2)),
+                CZY_KIER = dane$CZY_KIER)
+kable(addmargins(tab_62),
+      caption = "Two-way table PYT\\_2 x CZY\\_KIER.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+
+chi6 <- suppressWarnings(chisq.test(tab_62))
+chi6
+```
+
+P-value $= `r signif(chi6$p.value,3)`$. Przy $\alpha = 0{,}01$
+**`r ifelse(chi6$p.value < 0.01,"reject","we do not reject")`**
+independence hypothesis. Result agrees with the Freemana--Haltona
+in task 5.
+
+**Association plot (Pearson standardized residuals)** shows the sign and
+magnitude of each cell's contribution to $\chi^2$:
+
+```{r zad6-assoc, fig.cap="Association plot: rectangle height proportional to standardized residual; blue = positive, red = negative deviation from independence."}
+assoc(tab_62, shade = TRUE, main = NULL)
+```
+
+**Figure description 2.** Rectangles above the zero line (blue) are cells with more cases than independence predicts; below (red) — fewer. Largest deviations occur for extreme PYT_2 categories ("str. agree"/"str. disagree") among managers, suggesting opinions on training fit are related to position.
+
+\newpage
+
+## Task 7 — Independence test based on the likelihood ratio
+
+For an $r\times c$ table with counts $n_{ij}$ and total $n$, the statistic:
+$$
+G^2 = 2 \sum_{i,j} n_{ij} \log\!\Bigl(\frac{n_{ij}}{\hat m_{ij}}\Bigr),
+\qquad \hat m_{ij} = \frac{n_{i\cdot}\, n_{\cdot j}}{n},
+$$
+under $H_0$ of independence is asymptotically $\chi^2_{(r-1)(c-1)}$.
+
+```{r zad7}
+LR_indep_test <- function(tab) {
+  stopifnot(all(tab >= 0))
+  n  <- sum(tab)
+  r  <- nrow(tab); c <- ncol(tab)
+  mi <- outer(rowSums(tab), colSums(tab)) / n
+  pos <- tab > 0
+  G2 <- 2 * sum(tab[pos] * log(tab[pos] / mi[pos]))
+  df <- (r - 1) * (c - 1)
+  list(statistic = G2, df = df, p_value = 1 - pchisq(G2, df))
+}
+
+lr <- LR_indep_test(tab_62)
+tab7 <- data.frame(
+  Test         = c("Pearson chi-square (task 6)", "likelihood ratio (LR)"),
+  Statistic   = c(chi6$statistic, lr$statistic),
+  df           = c(chi6$parameter, lr$df),
+  `p-value`  = c(chi6$p.value, lr$p_value),
+  check.names  = FALSE
+)
+tab7$Statistic <- round(tab7$Statistic, 3)
+tab7$`p-value` <- signif(tab7$`p-value`, 3)
+kable(tab7, caption = "Comparison of Pearson and LR tests dla PYT\\_2 vs CZY\\_KIER.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Table description 7.** Asymptotically $\chi^2$ and $G^2$ share the same limiting distribution, but finite samples can differ — especially with very small cells (PYT_2 = 1 has only 2 observations). Here:
+$\chi^2 \approx `r round(chi6$statistic,2)`$ ($p \approx `r signif(chi6$p.value,2)`$),
+$G^2 \approx `r round(lr$statistic,2)`$ ($p \approx `r signif(lr$p_value,2)`$).
+At $\alpha = 0.05$ both reject $H_0$,
+**but at $\alpha = 0.01$ Pearson rejects while LR does not**. The discrepancy comes from low cell counts (`chisq.test` warning); then Fisher/Freeman--Halton (task 5c) with exact or simulated p-values is recommended.
+
+---
+
+# Part III
+
+## Task 8 — Smoking and mortality (lung cancer and heart disease)
+
+Data (annual death rates):
+
+| Disease               | Smokers $\pi_1$ | Non-smokers $\pi_2$ |
+|-----------------------|---------------:|------------------:|
+| lung cancer              |        0,00140 |           0,00010 |
+| coronary heart disease |        0,00669 |           0,00413 |
+
+Three association measures (smoking = exposure, disease/death = outcome):
+
+- proportion difference $\Delta = \pi_1 - \pi_2$,
+- relative risk $\mathrm{RR} = \pi_1/\pi_2$,
+- odds ratio $\mathrm{OR} = \frac{\pi_1/(1-\pi_1)}{\pi_2/(1-\pi_2)}$.
+
+```{r zad8}
+miary <- function(p1, p2) {
+  diff <- p1 - p2
+  RR   <- p1 / p2
+  OR   <- (p1 / (1 - p1)) / (p2 / (1 - p2))
+  c(`π1-π2` = diff, RR = RR, OR = OR)
+}
+lung  <- miary(0.00140, 0.00010)
+heart <- miary(0.00669, 0.00413)
+
+tab8 <- rbind(`lung cancer` = lung, `heart disease` = heart)
+tab8 <- round(tab8, 5)
+kable(tab8, caption = "Association measures: smoking vs death from lung cancer / heart disease.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Interpretation.**
+
+- **Lung cancer**: $\mathrm{RR} = 14.0$ means death risk from lung cancer among smokers is **14 times higher** than among non-smokers; OR ≈ RR (because $\pi_i \ll 1$). Proportion difference is small (0.0013), but baseline rate ($\pi_2 \sim 10^{-4}$) makes absolute difference weakly informative.
+- **Heart disease**: $\mathrm{RR} \approx 1.62$, $\mathrm{OR} \approx 1.62$. Smokers' risk is about 62% higher. $\Delta = 0.00256$ — larger in absolute terms than lung cancer (heart disease is much more common).
+
+**Strength of association.** Relative measures (RR, OR) show **smoking–lung cancer association is much stronger** (RR = 14 vs RR $\approx 1.62$), though in absolute terms (proportion difference) smoking $\to$ heart disease has greater population impact.
+
+## Task 9 — Association coefficients (gamma, tau)
+
+Pairs considered:
+
+1. PYT_2 (ordinal) vs CZY_KIER (binary — admissible as
+   ordinal),
+2. PYT_2 vs TENURE (both ordinal),
+3. CZY_KIER vs TENURE.
+
+Goodman--Kruskal gamma:
+$\gamma = (C - D)/(C + D)$, where $C, D$ are concordant and discordant pair counts.
+
+```{r zad9}
+gamma_tab <- function(tab) {
+  g <- DescTools::GoodmanKruskalGamma(tab, conf.level = 0.95)
+  tau <- DescTools::KendallTauB(tab, conf.level = 0.95)
+  c(gamma = unname(g[1]), gamma_L = unname(g[2]), gamma_U = unname(g[3]),
+    tau_b = unname(tau[1]), tau_L = unname(tau[2]), tau_U = unname(tau[3]))
+}
+
+# Ordinal encodings
+tab_9a <- table(dane$PYT_2,    dane$CZY_KIER)
+tab_9b <- table(dane$PYT_2,    dane$STAZ)
+tab_9c <- table(dane$CZY_KIER, dane$STAZ)
+
+tab9 <- rbind(
+  `PYT_2 vs CZY_KIER` = gamma_tab(tab_9a),
+  `PYT_2 vs TENURE`     = gamma_tab(tab_9b),
+  `CZY_KIER vs TENURE`  = gamma_tab(tab_9c)
+)
+tab9 <- round(tab9, 3)
+kable(tab9,
+      caption = "Goodman-Kruskal gamma i Kendall tau-b z 95\\% PU.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Table description 9.** Values $\gamma \in [-1,1]$; sign indicates direction of monotonic association, magnitude its strength. Similarly for $\tau_b$ (tie-corrected). Interpretation:
+
+- **PYT_2 vs CZY_KIER** — gamma away from 0 indicates monotonic association (consistent with task 6),
+- **PYT_2 vs TENURE** — strength near 0 suggests training-fit opinions do not align monotonically with tenure,
+- **CZY_KIER vs TENURE** — directional alignment of management role with tenure.
+
+Confidence intervals containing 0 indicate non-significance of the association measure.
+
+\newpage
+
+## Task 10 — Correspondence analysis "from scratch"
+
+Correspondence analysis (CA) is a graphical method for exploring two-way tables. Let $N$ be a table of dimensions $r\times c$, $n = \sum n_{ij}$,
+relative frequency matrix $P = N/n$, mass vectors $r = P\mathbf 1$,
+$c = P^\top\mathbf 1$. Standardized residual matrix:
+$$
+S = D_r^{-1/2} (P - r c^\top) D_c^{-1/2},
+\qquad D_r = \mathrm{diag}(r),\ D_c = \mathrm{diag}(c).
+$$
+SVD: $S = U \Sigma V^\top$. Principal coordinates:
+rows $F = D_r^{-1/2} U \Sigma$, columns $G = D_c^{-1/2} V \Sigma$.
+
+```{r zad10-fun}
+moja_CA <- function(N, dim = 2) {
+  N <- as.matrix(N)
+  stopifnot(all(N >= 0))
+  n <- sum(N)
+  P <- N / n
+  r <- rowSums(P); c <- colSums(P)
+  Dr_inv_half <- diag(1 / sqrt(r))
+  Dc_inv_half <- diag(1 / sqrt(c))
+  S <- Dr_inv_half %*% (P - r %o% c) %*% Dc_inv_half
+  sv <- svd(S)
+  inertia <- sv$d^2
+  Fcoord <- Dr_inv_half %*% sv$u %*% diag(sv$d)
+  Gcoord <- Dc_inv_half %*% sv$v %*% diag(sv$d)
+  rownames(Fcoord) <- rownames(N); rownames(Gcoord) <- colnames(N)
+  list(row_coords = Fcoord[, 1:dim, drop = FALSE],
+       col_coords = Gcoord[, 1:dim, drop = FALSE],
+       singular_values = sv$d,
+       inertia = inertia,
+       explained = inertia / sum(inertia),
+       r_mass = r, c_mass = c, S = S)
+}
+
+plot_CA <- function(ca, main = "Correspondence analysis") {
+  R <- ca$row_coords; G <- ca$col_coords
+  ran <- range(c(R[,1], G[,1], R[,2], G[,2])) * 1.15
+  plot(NA, xlim = ran, ylim = ran, xlab = "Dim 1", ylab = "Dim 2",
+       main = main, asp = 1)
+  abline(h = 0, v = 0, lty = 3, col = "gray60")
+  points(R, pch = 19, col = "steelblue")
+  text(R, rownames(R), pos = 3, cex = 0.9, col = "steelblue")
+  points(G, pch = 17, col = "firebrick")
+  text(G, rownames(G), pos = 3, cex = 0.9, col = "firebrick")
+  legend("topright", legend = c("rows (PYT_2)", "columns (TENURE)"),
+         pch = c(19,17), col = c("steelblue","firebrick"), bty = "n")
+}
+```
+
+Application to the pair PYT_2 × TENURE:
+
+```{r zad10-apply, fig.cap="Two-dimensional correspondence analysis map for PYT\\_2 (blue) and TENURE (red). Nearby points indicate associated categories."}
+tabela_10 <- table(PYT_2 = factor(dane$PYT_2, levels=c(-2,-1,1,2),
+                                  labels = etyk_pyt2),
+                   STAZ  = factor(dane$STAZ, levels=c(1,2,3),
+                                  labels=c("tenure 1","tenure 2","tenure 3")))
+ca <- moja_CA(tabela_10)
+
+tab10 <- data.frame(
+  Dimension = seq_along(ca$singular_values),
+  `sigma (singular value)` = round(ca$singular_values, 4),
+  inertia = round(ca$inertia, 4),
+  `% explained` = round(ca$explained * 100, 2),
+  check.names = FALSE
+)
+kable(tab10, caption = "Singular values and inertia from CA.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+
+plot_CA(ca)
+```
+
+**Table description 10 and Figure 3.** Combined inertia of the first two dimensions explains
+$`r round(sum(ca$explained[1:2])*100,1)`\%$ of variation. Nearby points indicate strongly associated categories
+(e.g. a tenure level co-occurs with a PYT_2 response more than chance). The first axis usually contrasts positive vs negative opinions; the second reveals non-monotonic patterns.
+
+---
+
+# Additional tasks
+
+## Task *1 — Distance correlation test (dCor)
+
+Székely--Rizzo distance correlation: $\mathrm{dCor}(X,Y) = 0 \iff X \perp Y$.
+Permutation test p-value:
+
+```{r zad-dcor}
+dcor_test <- function(x, y, R = 999) {
+  stopifnot(length(x) == length(y))
+  obs <- energy::dcor(x, y)
+  T_rep <- replicate(R, energy::dcor(x, sample(y)))
+  p_val <- (1 + sum(T_rep >= obs)) / (R + 1)
+  list(statistic = obs, p_value = p_val, R = R)
+}
+
+# Examples
+set.seed(2025)
+x <- rnorm(200); y1 <- rnorm(200); y2 <- x^2 + rnorm(200, sd = 0.1)
+
+t1 <- dcor_test(x, y1)     # independent
+t2 <- dcor_test(x, y2)     # nonlinear dependence
+
+rbind(independent = unlist(t1),
+      nonlinear   = unlist(t2)) |>
+  round(4) |>
+  kable(caption = "Independence test based on dCor (999 permutations).,
+        booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Table description *1.** For independent $X, Y_1$, dCor is near 0 with large p-value. For nonlinear $Y_2 = X^2$ (undetected by Pearson), dCor detects strong dependence (p-value $\ll 0.05$).
+
+## Task *2 — $|\mathrm{RR} - 1| \le |\mathrm{OR} - 1|$ (RR closer to 1 than OR)
+
+Dla $\pi_1, \pi_2 \in (0,1)$:
+$$
+\mathrm{OR} - 1 = \frac{\pi_1(1 - \pi_2) - \pi_2(1 - \pi_1)}{\pi_2(1-\pi_1)}
+               = \frac{\pi_1 - \pi_2}{\pi_2(1-\pi_1)},
+$$
+$$
+\mathrm{RR} - 1 = \frac{\pi_1 - \pi_2}{\pi_2}.
+$$
+Stosunek:
+$$
+\frac{\mathrm{OR} - 1}{\mathrm{RR} - 1} = \frac{1}{1 - \pi_1} \ge 1,
+$$
+because $1-\pi_1 \in (0,1]$. Both expressions have the same sign (wyznacznik
+$\pi_1 - \pi_2$). Hence:
+$$
+|\mathrm{OR} - 1| \ge |\mathrm{RR} - 1|,
+$$
+so **RR is not farther from 1 than OR**; equality holds as $\pi_1 \to 0$.
+
+Numerical illustration:
+
+```{r zad-gwiazdka2}
+pi1 <- seq(0.01, 0.9, by = 0.05)
+pi2 <- 0.1
+OR <- (pi1*(1-pi2))/(pi2*(1-pi1))
+RR <- pi1/pi2
+data.frame(pi1, RR, OR,
+           `|RR-1|` = abs(RR-1), `|OR-1|` = abs(OR-1),
+           check.names = FALSE) |>
+  head(6) |> round(3) |>
+  kable(caption = "Illustration: |OR-1| >= |RR-1|.", booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+## Task *3 — Attributable risk
+
+**(a)** $\mathrm{AR} = [P(D) - P(D|E')]/P(D)$ is the
+**fraction of cases in the population attributable to exposure $E$**.
+The numerator is population risk increase vs. nobody exposed ($P(D|E')$). Dividing by $P(D)$ gives share of total disease burden.
+
+**(b)** From the total probability formula:
+$$
+P(D) = P(E)P(D|E) + P(E')P(D|E').
+$$
+Oznaczmy $\pi_E = P(D|E),\ \pi_{E'}=P(D|E'),\ q = P(E)$. Wtedy
+$P(D) = q\pi_E + (1-q)\pi_{E'}$, hence:
+$$
+P(D) - P(D|E') = q(\pi_E - \pi_{E'})
+= q\,\pi_{E'}\,(\mathrm{RR} - 1),\qquad \mathrm{RR} = \pi_E/\pi_{E'}.
+$$
+Dividing by $P(D) = \pi_{E'}(1 + q(\mathrm{RR}-1))$:
+$$
+\mathrm{AR}
+= \frac{q\,\pi_{E'}(\mathrm{RR}-1)}{\pi_{E'}\bigl(1 + q(\mathrm{RR}-1)\bigr)}
+= \frac{P(E)(\mathrm{RR}-1)}{1 + P(E)(\mathrm{RR}-1)},
+$$
+which completes the proof. $\blacksquare$
+
+---
+
+# Summary
+
+- Simultaneous 95% CIs for the PYT_1 response probability vector show clear dominance of the "satisfied" category.
+- The `p_value_multinom()` function efficiently tests fit to $p_0$; PYT_1 in PD is not uniform.
+- For PYT_2 × CZY_KIER, Fisher/Freeman--Halton, Pearson $\chi^2$, and LR agree: significant association exists. Aggregating PYT_2 to CZY_ZADOW usually reduces power.
+- Smoking–lung cancer association is much stronger (RR $\approx 14$) than smoking–heart disease (RR $\approx 1.62$).
+- Gamma/tau coefficients and the CA map provide exploratory tools consistent with formal tests.

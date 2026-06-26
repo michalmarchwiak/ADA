@@ -1,0 +1,795 @@
+---
+title: "Survey Data Analysis -- Report 1"
+author: "Michał Marchwiak 276003 Weronika Mitulska 277475"
+date: "today"
+lang: en
+format:
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    geometry: margin=2.5cm
+    fontsize: 11pt
+    pdf-engine: lualatex
+    include-in-header:
+      text: |
+        \usepackage{float}
+        \floatplacement{figure}{H}
+        \usepackage{booktabs}
+        \usepackage{longtable}
+        \usepackage{caption}
+        \usepackage{fontspec}
+        \setmainfont{Latin Modern Roman}
+execute:
+  warning: false
+  message: false
+  echo: false
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(scales)
+library(gridExtra)
+library(binom)
+
+options(knitr.kable.NA = "--")
+knitr::opts_chunk$set(fig.pos = "H")
+
+# Helper: returns raw table LaTeX without floats.
+# Uses \captionof instead of caption= to avoid KOMA-script minipage conflicts.
+kable_raw <- function(df, caption_txt) {
+    tab_latex <- as.character(
+        kable(df,
+            booktabs = TRUE,
+            linesep  = "",
+            escape   = TRUE,
+            format   = "latex"
+        )
+    )
+    paste0("\\captionof{table}{", caption_txt, "}\n", tab_latex)
+}
+
+# Helper: strips float table from raw kable LaTeX (needed before minipage)
+strip_float <- function(x) {
+    x <- gsub("\\\\begin\\{table\\}[^\n]*\n", "", x)
+    x <- gsub("\\\\end\\{table\\}", "", x)
+    x <- gsub("\\\\begin\\{center\\}", "", x)
+    x <- gsub("\\\\end\\{center\\}", "", x)
+    x
+}
+
+# Helper: prints two tables side by side in minipage
+side_by_side <- function(k1_raw, k2_raw, width = "0.48") {
+    cat("\\vspace{4pt}\n\\noindent\n")
+    cat(paste0("\\begin{minipage}[t]{", width, "\\textwidth}\n"))
+    cat(strip_float(k1_raw))
+    cat(paste0("\n\\end{minipage}\\hfill\n"))
+    cat(paste0("\\begin{minipage}[t]{", width, "\\textwidth}\n"))
+    cat(strip_float(k2_raw))
+    cat("\n\\end{minipage}\n\\vspace{4pt}\n")
+}
+```
+
+```{r mosaic-function, include=FALSE}
+mosaic_plot <- function(df, var_x, var_y, title = "") {
+    tab <- table(df[[var_y]], df[[var_x]])
+    prop_col <- prop.table(tab, margin = 2)
+    n_x <- colSums(tab)
+    total <- sum(n_x)
+    width <- n_x / total
+    xmax_vals <- cumsum(width)
+    xmin_vals <- c(0, head(xmax_vals, -1))
+
+    df_rect <- map_dfr(seq_along(colnames(tab)), function(i) {
+        ymax_vals <- cumsum(prop_col[, i])
+        ymin_vals <- c(0, head(ymax_vals, -1))
+        tibble(
+            x_label = colnames(tab)[i],
+            y_label = rownames(tab),
+            xmin    = xmin_vals[i] + 0.005,
+            xmax    = xmax_vals[i] - 0.005,
+            ymin    = ymin_vals,
+            ymax    = ymax_vals,
+            n       = as.integer(tab[, i]),
+            pct     = round(prop_col[, i] * 100, 1)
+        )
+    })
+
+    x_labels <- tibble(
+        x     = (xmin_vals + xmax_vals) / 2,
+        label = paste0(colnames(tab), "\n(n=", n_x, ")")
+    )
+
+    n_levels <- nrow(prop_col)
+    pal <- colorRampPalette(c("#d73027", "#fc8d59", "#fee090", "#91bfdb", "#4575b4"))(n_levels)
+
+    ggplot(df_rect) +
+        geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = y_label),
+            color = "white", linewidth = 0.4
+        ) +
+        geom_text(
+            aes(
+                x = (xmin + xmax) / 2, y = (ymin + ymax) / 2,
+                label = ifelse(pct >= 6, paste0(pct, "%"), "")
+            ),
+            size = 2.8, color = "white", fontface = "bold"
+        ) +
+        scale_x_continuous(breaks = x_labels$x, labels = x_labels$label, expand = c(0, 0)) +
+        scale_y_continuous(labels = label_percent(), expand = c(0, 0)) +
+        scale_fill_manual(values = pal) +
+        labs(title = title, x = NULL, y = "Percentage", fill = NULL) +
+        theme_minimal(base_size = 10) +
+        theme(
+            plot.title      = element_text(hjust = 0.5, face = "bold"),
+            legend.position = "bottom",
+            panel.grid      = element_blank(),
+            axis.text.x     = element_text(size = 8)
+        )
+}
+```
+
+\newpage
+
+# Introduction
+
+The purpose of this report is a comprehensive analysis of employee survey results evaluating training programs implemented by the company. The study was conducted among employees from different departments and organizational levels, enabling a multidimensional assessment of training policy effectiveness.
+
+The report is divided into three main parts. **Part I** covers descriptive analysis — demographic and organizational characteristics of the sample and response distributions. **Part II** covers interval estimation of satisfaction indicators using Clopper-Pearson confidence intervals. **Part III** covers statistical hypothesis testing regarding equal opportunity and effectiveness of implemented measures.
+
+The analysis results can serve as a basis for developing a strategy to improve the training system, better tailoring offerings to employee groups, and evaluating return on investment in human capital development.
+
+# Part I -- descriptive analysis
+
+## Task 1 -- Loading and preparing data
+
+The first step is importing raw data from `ankieta.csv` and transforming it into a form suitable for statistical analysis. The file contains employee responses collected in the survey.
+
+Qualitative variables (department, tenure, gender, position, question responses) are converted to **factors** — ordered categorical variables. This lets R correctly interpret their hierarchy (e.g. Likert scale from "Strongly disagree" to "Strongly agree") when creating tables and plots. Age is converted to numeric type.
+
+```{r}
+dane <- read.csv("ankieta.csv",
+    stringsAsFactors = FALSE,
+    fileEncoding     = "UTF-8",
+    check.names      = FALSE,
+    sep              = ";"
+)
+```
+
+```{r}
+dane <- dane %>%
+    mutate(
+        DZIAL = factor(DZIAL, levels = c("HR", "IT", "PD", "MK")),
+        STAZ = factor(STAZ,
+            levels = c(1, 2, 3),
+            labels = c("Less than 1 year", "1-3 years", ">3 years")
+        ),
+        CZY_KIER = factor(CZY_KIER, levels = c("Tak", "Nie")),
+        PLEC = factor(PLEC, levels = c("K", "M")),
+        PYT_1 = factor(PYT_1,
+            levels = c(-2, -1, 0, 1, 2),
+            labels = c(
+                "Strongly disagree", "Disagree",
+                "No opinion", "Agree", "Strongly agree"
+            )
+        ),
+        PYT_2 = factor(PYT_2,
+            levels = c(-2, -1, 1, 2),
+            labels = c(
+                "Strongly disagree", "Disagree",
+                "Agree", "Strongly agree"
+            )
+        ),
+        PYT_3 = factor(PYT_3,
+            levels = c(-2, -1, 1, 2),
+            labels = c(
+                "Strongly disagree", "Disagree",
+                "Agree", "Strongly agree"
+            )
+        ),
+        WIEK = as.numeric(WIEK)
+    )
+```
+
+After loading data, we display each factor's levels and the WIEK range to verify correct import:
+
+```{r}
+for (v in c("DZIAL", "STAZ", "CZY_KIER", "PLEC", "PYT_1", "PYT_2", "PYT_3")) {
+    cat(v, ":", paste(levels(dane[[v]]), collapse = ", "), "\n")
+}
+cat("WIEK range:", range(dane$WIEK, na.rm = TRUE), "\n")
+```
+
+### Checking for missing data
+
+Before the main analysis, it is essential to check data completeness. Missing values may result from respondent refusal, data collection errors, or — as with `PYT_3` — the question being asked only to a selected subgroup (e.g. employees who participated in the second survey wave).
+
+```{r}
+braki <- dane %>%
+    summarise(across(everything(), ~ sum(is.na(.)))) %>%
+    pivot_longer(everything(),
+        names_to  = "Variable",
+        values_to = "Missing count"
+    )
+
+kable(braki,
+    caption  = "Number of missing values for each variable",
+    booktabs = TRUE,
+    linesep  = "",
+    escape   = TRUE
+) %>%
+    kable_styling(
+        latex_options = c("striped", "hold_position"),
+        full_width = FALSE
+    )
+```
+
+**Conclusions:** The table shows the number of missing observations for each variable. If missing values affect only `PYT_3`, this is expected — the question was asked only to participants in the follow-up survey after a training cycle. Missing values in other demographic variables (if any) require caution — they may indicate selective non-response. In further analysis, missing values are handled locally (`filter(!is.na())`), so percentage denominators refer to valid observations, not the full sample.
+
+## Task 2 -- Categorizing the age variable
+
+The continuous age variable is difficult to analyze directly in tables — each unique age would form a separate category. We apply **discretization** (*binning*): respondent age is split into four right-closed intervals corresponding to natural career stages:
+
+-   **Up to 35 years** — employees at the start of their careers (juniors, mid-level);
+-   **36--45 years** — mid-career employees (seniors, specialists);
+-   **46--55 years** — experienced staff, often in management roles;
+-   **Over 55 years** — employees approaching the end of their careers.
+
+This split helps assess whether training preferences and ratings differ across generations, which is especially relevant given growing differences between Generation Z and older cohorts in learning approaches.
+
+```{r}
+dane <- dane %>%
+    mutate(
+        WIEK_KAT = cut(WIEK,
+            breaks = c(-Inf, 35, 45, 55, Inf),
+            labels = c("Up to 35", "36-45", "46-55", "Over 55"),
+            right  = TRUE
+        )
+    )
+
+table(dane$WIEK_KAT)
+```
+
+## Task 3 -- Respondent structure (frequency tables)
+
+Frequency tables show how diverse the sample is demographically and organizationally. This is a key step before analyzing substantive questions — it helps identify **sample composition effects**: if one group is clearly overrepresented, its opinions disproportionately influence aggregate results.
+
+```{r}
+make_tab_licznosci <- function(zm, nazwa) {
+    tab <- dane %>%
+        count({{ zm }}) %>%
+        filter(!is.na({{ zm }})) %>%
+        mutate(Procent = round(n / sum(n) * 100, 1)) %>%
+        rename(Category = 1, Count = n, `Percent share` = Procent)
+    kable_raw(tab, paste("Frequency table --", nazwa))
+}
+```
+
+### Organizational breakdown and tenure
+
+The tables below show the distribution of respondents by department and tenure. This information is needed to assess sample representativeness — whether all departments are proportionally represented and whether newer or more experienced employees predominate.
+
+```{r results='asis'}
+side_by_side(
+    make_tab_licznosci(DZIAL, "Department (DZIAL)"),
+    make_tab_licznosci(STAZ, "Tenure (STAZ)")
+)
+```
+
+**Conclusions:** Analyzing the departmental split shows whether survey results represent the whole company or are dominated by one department. If IT exceeds 50% of the sample and training is designed for that department, ratings may be systematically higher than under stratified sampling. Tenure distribution reflects workforce maturity — a predominance of short-tenure employees suggests active hiring and the importance of onboarding training. Long-tenure employees tend to have higher and more specific training expectations, which can lower overall ratings.
+
+### Gender, management role, and age
+
+The next three tables characterize the sample by gender, management representation, and age structure. These data matter when interpreting results — they help assess whether observed rating differences stem from demographic factors.
+
+```{r results='asis'}
+side_by_side(
+    make_tab_licznosci(CZY_KIER, "Management role"),
+    make_tab_licznosci(PLEC, "Gender (PLEC)")
+)
+```
+
+```{r}
+tab_wiek <- dane %>%
+    count(WIEK_KAT) %>%
+    filter(!is.na(WIEK_KAT)) %>%
+    mutate(Procent = round(n / sum(n) * 100, 1)) %>%
+    rename(Category = 1, Count = n, `Percent share` = Procent)
+
+kable(tab_wiek,
+    caption  = "Frequency table -- Age category (WIEK\\_KAT)",
+    booktabs = TRUE,
+    linesep  = "",
+    escape   = FALSE
+) %>%
+    kable_styling(
+        latex_options = c("striped", "hold_position"),
+        full_width = FALSE
+    )
+```
+
+**Conclusions:** The share of management staff in the sample should be close to the company's actual structure — managers typically make up 15--25% of the workforce. Overrepresentation of managers could inflate training ratings (managers participate more often and may view training more positively). For gender, check whether the sample reflects company structure — gender imbalance can distort results if women and men have different training experiences. Age structure analysis shows whether the company mainly employs younger workers (typical of tech firms and start-ups) or has a more balanced age distribution.
+
+# Task 4 -- Response distributions for survey questions
+
+Analyzing response distributions for individual questions is the core of descriptive analysis. For each question we present two complementary charts: a **pie chart** (quick proportion assessment) and a **bar chart** (precise category comparison). Together they capture the overall picture and highlight differences between response categories.
+
+## Question 1: Satisfaction with availability of training materials
+
+Question 1 measures the extent to which employees agree with a statement about the availability of training materials. A **five-point Likert scale** with a neutral option ("No opinion") allows respondents to express no firm view without forcing an arbitrary choice.
+
+```{r fig.width=10, fig.height=4, dev='ragg_png', dpi=300}
+kol5 <- c("#d73027", "#fc8d59", "#fee090", "#91bfdb", "#4575b4")
+
+df1 <- dane %>%
+    count(PYT_1) %>%
+    filter(!is.na(PYT_1)) %>%
+    mutate(
+        pct = n / sum(n) * 100,
+        lab = paste0(round(pct, 1), "%")
+    )
+
+p_kol1 <- ggplot(df1, aes(x = "", y = pct, fill = PYT_1)) +
+    geom_col(width = 1, color = "white") +
+    coord_polar("y") +
+    geom_text(aes(label = lab), position = position_stack(vjust = 0.5), size = 3) +
+    scale_fill_manual(values = kol5) +
+    labs(title = "PYT_1 – Percentage share (pie)", fill = NULL) +
+    theme_void() +
+    theme(
+        legend.position = "bottom",
+        legend.text = element_text(size = 8),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 11)
+    )
+
+p_slup1 <- ggplot(df1, aes(x = PYT_1, y = pct, fill = PYT_1)) +
+    geom_col(color = "white", show.legend = FALSE) +
+    geom_text(aes(label = lab), vjust = -0.5, size = 3.5) +
+    scale_fill_manual(values = kol5) +
+    scale_y_continuous(
+        limits = c(0, max(df1$pct) * 1.2),
+        labels = label_percent(scale = 1)
+    ) +
+    labs(title = "PYT_1 – Opinion distribution (bar)", x = NULL, y = "Percentage (%)") +
+    theme_minimal(base_size = 10) +
+    theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 20, hjust = 1, size = 9)
+    )
+
+grid.arrange(p_kol1, p_slup1, ncol = 2)
+```
+
+**Analysis:** Presenting both charts side by side enables a multidimensional assessment of opinion distribution. Dominance of positive responses ("Agree" and "Strongly agree") would indicate satisfaction with training material availability. However, a substantial share of neutral responses ("No opinion") may indicate insufficient awareness of available resources — employees may not use materials because they do not know they exist, not because they rate them negatively. This signals a need for communication (e.g. an e-learning platform campaign). A high share of negative responses would call for an audit of training resource quality and accessibility.
+
+## Question 2: Training, promotion opportunities, and development needs
+
+Question 2 assesses whether training meets employees' development needs and supports their career paths. Unlike question 1, a **forced four-point scale** (no neutral option) encourages respondents to take a clear stance for or against. This is used deliberately when the researcher wants to avoid responses clustering in the middle of the scale.
+
+```{r fig.width=10, fig.height=4, dev='ragg_png', dpi=300}
+kol4 <- c("#d73027", "#fc8d59", "#91bfdb", "#4575b4")
+
+df2 <- dane %>%
+    count(PYT_2) %>%
+    filter(!is.na(PYT_2)) %>%
+    mutate(
+        pct = n / sum(n) * 100,
+        lab = paste0(round(pct, 1), "%")
+    )
+
+p_kol2 <- ggplot(df2, aes(x = "", y = pct, fill = PYT_2)) +
+    geom_col(width = 1, color = "white") +
+    coord_polar("y") +
+    geom_text(aes(label = lab), position = position_stack(vjust = 0.5), size = 3) +
+    scale_fill_manual(values = kol4) +
+    labs(title = "PYT_2 – Percentage share (pie)", fill = NULL) +
+    theme_void() +
+    theme(
+        legend.position = "bottom",
+        legend.text = element_text(size = 8),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 11)
+    )
+
+p_slup2 <- ggplot(df2, aes(x = PYT_2, y = pct, fill = PYT_2)) +
+    geom_col(color = "white", show.legend = FALSE) +
+    geom_text(aes(label = lab), vjust = -0.5, size = 3.5) +
+    scale_fill_manual(values = kol4) +
+    scale_y_continuous(
+        limits = c(0, max(df2$pct) * 1.2),
+        labels = label_percent(scale = 1)
+    ) +
+    labs(title = "PYT_2 – Opinion distribution (bar)", x = NULL, y = "Percentage (%)") +
+    theme_minimal(base_size = 10) +
+    theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 20, hjust = 1, size = 9)
+    )
+
+grid.arrange(p_kol2, p_slup2, ncol = 2)
+```
+
+**Analysis:** The forced four-point scale clearly polarizes responses, making it easier to identify the dominant mood. If question 2 scores worse than question 1, employees appreciate material availability (PYT_1) but feel training poorly translates into promotion opportunities and individual needs (PYT_2). This is common in organizations offering standardized catalog programs instead of paths tailored to roles and ambitions. Such a result should prompt HR to implement **individual development plans (IDPs)** and regular manager–employee discussions about training needs.
+
+# Task 5 -- Cross-tabulations
+
+Cross-tabulations (contingency tables) examine relationships between demographic and organizational variables and training ratings in question 1. For each variable pair we create two tables: **counts** (how many in each group gave each response) and **column profile** (what percentage of each group gave each response). The column profile is key — it compares groups of different sizes on a common percentage scale.
+
+Interpretation: if column profiles differ clearly between groups (e.g. IT employees are much more satisfied than HR employees), there is **internal differentiation** requiring deeper analysis and differentiated training offerings.
+
+```{r}
+make_cross <- function(var2, nazwa2) {
+    tab <- table(PYT_1 = dane$PYT_1, dane[[var2]])
+    tab_pct <- round(prop.table(tab, margin = 2) * 100, 1)
+
+    df_tab <- as.data.frame.matrix(tab)
+    df_tab_pct <- as.data.frame.matrix(tab_pct)
+
+    list(
+        kable_raw(df_tab, paste("PYT\\_1 vs", nazwa2, "– Counts")),
+        kable_raw(df_tab_pct, paste("PYT\\_1 vs", nazwa2, "– Column profile (\\%)"))
+    )
+}
+```
+
+## Analysis by organizational characteristics
+
+### Question 1 by department
+
+Comparing ratings across departments assesses whether training is equally well matched to work specifics across the organization. Departments differ in professional profile, pace of technological change, and organizational culture, which may lead to different training expectations.
+
+```{r results='asis'}
+r1 <- make_cross("DZIAL", "Department")
+side_by_side(r1[[1]], r1[[2]])
+```
+
+**Conclusions:** If column profiles are similar across departments, training is perceived evenly across the organization. If one department clearly diverges (especially negatively), investigate whether training is suited to its specifics. IT may expect more advanced technical training, HR soft skills and labor law training, and marketing (MK) digital tools and analytics training.
+
+### Question 1 by tenure
+
+Tenure is one of the most important moderators of training ratings. Short-tenure employees evaluate training through onboarding and basic skills acquisition, while veterans expect advanced, specialized training tied to concrete projects.
+
+```{r results='asis'}
+r2 <- make_cross("STAZ", "Tenure")
+cat("\\vspace{4pt}\n")
+cat(strip_float(r2[[1]]))
+cat("\n\\vspace{8pt}\n")
+cat(strip_float(r2[[2]]))
+cat("\n\\vspace{4pt}\n")
+```
+
+**Conclusions:** Differences in column profiles across tenure groups indicate a need for **training program segmentation**. If longest-tenure employees rate training worst, this may reflect a lack of expert-level offerings or training that is too basic for them. If new employees rate positively, that confirms onboarding effectiveness. The company should consider separate paths: onboarding (short tenure) and advanced (veterans).
+
+### Question 1 by management role
+
+Managers and non-managerial staff participate in different types of training and have different needs — the former focus on leadership and management, the latter on technical and industry skills. This variable helps assess whether both segments are equally well served by the training function.
+
+```{r results='asis'}
+r3 <- make_cross("CZY_KIER", "Management role")
+side_by_side(r3[[1]], r3[[2]])
+```
+
+**Conclusions:** Large differences between managers and non-managers in column profiles indicate asymmetry in perceived training value. Higher manager ratings may reflect greater influence over training selection and participation in better-matched external programs. Lower manager ratings may signal investment mainly in operational training at the expense of management development.
+
+## Question 1 by gender
+
+Analyzing differences between women and men in training material ratings assesses whether training policy is gender-neutral or whether one group is systematically underserved.
+
+```{r results='asis'}
+r4 <- make_cross("PLEC", "Gender")
+side_by_side(r4[[1]], r4[[2]])
+```
+
+**Conclusions:** No significant gender differences in column profiles would indicate gender-neutral training policy — a desirable outcome. If one group rates material availability clearly worse, investigate causes: employment structure (gender concentration in different departments or roles) or training content (programs not reflecting one gender's perspective). Interpret this table together with gender distribution by department to rule out interaction effects.
+
+## Preparing variables CZY_ZADOW and CZY_ZADOW_2
+
+As instructed, before inferential analysis (estimation and hypothesis testing), we construct binary variables for training satisfaction. `CZY_ZADOW` and `CZY_ZADOW_2` aggregate positive and negative responses to `PYT_2` and `PYT_3`, respectively.
+
+```{r}
+dane <- dane %>%
+    mutate(
+        CZY_ZADOW = case_when(
+            PYT_2 %in% c("Strongly disagree", "Disagree") ~ 0,
+            PYT_2 %in% c("Agree", "Strongly agree") ~ 1,
+            TRUE ~ NA_real_
+        ),
+        CZY_ZADOW_2 = case_when(
+            PYT_3 %in% c("Strongly disagree", "Disagree") ~ 0,
+            PYT_3 %in% c("Agree", "Strongly agree") ~ 1,
+            TRUE ~ NA_real_
+        )
+    )
+```
+
+# Part II -- interval estimation
+
+## Task 2 -- Clopper-Pearson confidence interval function
+
+The Clopper-Pearson confidence interval (exact interval) is based on the binomial distribution. It uses Beta distribution quantiles for lower and upper bounds. Below we define `clopper_pearson`, which takes confidence level, number of successes, and sample size (or optionally a data vector from which it computes these values).
+
+```{r}
+clopper_pearson <- function(conf.level = 0.95, x = NULL, n = NULL, data_vec = NULL) {
+    if (!is.null(data_vec)) {
+        data_vec <- na.omit(data_vec)
+        n <- length(data_vec)
+        x <- sum(data_vec == 1)
+    }
+
+    alpha <- 1 - conf.level
+
+    lower <- ifelse(x == 0, 0, qbeta(alpha / 2, x, n - x + 1))
+    upper <- ifelse(x == n, 1, qbeta(1 - alpha / 2, x + 1, n - x))
+
+    return(c(lower = lower, upper = upper))
+}
+```
+
+## Task 3 -- Confidence interval calculations
+
+Using the function we compute confidence intervals for the probability of training satisfaction in the first period (`CZY_ZADOW`) and after training modification (`CZY_ZADOW_2`), at confidence level $1-\alpha = 0.95$. \newpage{}
+
+```{r}
+# Period 1
+cp_1 <- clopper_pearson(conf.level = 0.95, data_vec = dane$CZY_ZADOW)
+# Period 2
+cp_2 <- clopper_pearson(conf.level = 0.95, data_vec = dane$CZY_ZADOW_2)
+
+df_cp <- data.frame(
+    Period = c("Before modification (CZY_ZADOW)", "After modification (CZY_ZADOW_2)"),
+    `Lower bound` = c(cp_1["lower"], cp_2["lower"]),
+    `Upper bound` = c(cp_1["upper"], cp_2["upper"]),
+    check.names = FALSE
+)
+
+kable(df_cp,
+    digits = 4, caption = "Clopper-Pearson confidence intervals (95%)",
+    booktabs = TRUE
+) %>%
+    kable_styling(latex_options = "hold_position")
+```
+
+**Conclusions:** The second-period interval width differs, likely because `PYT_3` has fewer observations (not all employees participated in the second wave, hence greater uncertainty). We can nonetheless locate the proportion satisfied with training within the computed intervals with 95% confidence.
+
+## Task 4 -- Coverage probability and length simulations
+
+We run a simulation comparing confidence intervals: Clopper-Pearson (exact), Wald (asymptotic), and Wilson for sample sizes $n \in \{30, 100, 1000\}$ and success probabilities $p \in (0, 1)$.
+
+```{r fig.height=8, fig.width=10, dev='ragg_png', dpi=300}
+set.seed(123)
+n_vals <- c(30, 100, 1000)
+p_vals <- seq(0.01, 0.99, length.out = 100)
+n_sim <- 5000
+alpha <- 0.05
+z <- qnorm(1 - alpha / 2)
+
+wyniki <- data.frame()
+
+for (n in n_vals) {
+    for (p in p_vals) {
+        x_sim <- rbinom(n_sim, n, p)
+
+        # Clopper-Pearson
+        cp_low <- qbeta(alpha / 2, x_sim, n - x_sim + 1)
+        cp_low[x_sim == 0] <- 0
+        cp_up <- qbeta(1 - alpha / 2, x_sim + 1, n - x_sim)
+        cp_up[x_sim == n] <- 1
+
+        # Wald
+        p_hat <- x_sim / n
+        margin_wald <- z * sqrt(p_hat * (1 - p_hat) / n)
+        wald_low <- p_hat - margin_wald
+        wald_up <- p_hat + margin_wald
+
+        # Wilson
+        p_tilde <- (x_sim + z^2 / 2) / (n + z^2)
+        n_tilde <- n + z^2
+        margin_wilson <- z * sqrt(p_tilde * (1 - p_tilde) / n_tilde)
+        wil_low <- p_tilde - margin_wilson
+        wil_up <- p_tilde + margin_wilson
+
+        # Computing coverage
+        cover_cp <- mean(cp_low <= p & p <= cp_up)
+        cover_wald <- mean(wald_low <= p & p <= wald_up)
+        cover_wil <- mean(wil_low <= p & p <= wil_up)
+
+        # Mean interval lengths
+        len_cp <- mean(cp_up - cp_low)
+        len_wald <- mean(wald_up - wald_low)
+        len_wil <- mean(wil_up - wil_low)
+
+        wyniki <- rbind(wyniki, data.frame(
+            n = n, p = p,
+            Method = rep(c("Clopper-Pearson", "Wald", "Wilson"), each = 1),
+            Coverage = c(cover_cp, cover_wald, cover_wil),
+            Length = c(len_cp, len_wald, len_wil)
+        ))
+    }
+}
+
+wyniki$n_label <- factor(paste("n =", wyniki$n),
+    levels = c("n = 30", "n = 100", "n = 1000")
+)
+
+p_cov <- ggplot(wyniki, aes(x = p, y = Coverage, color = Method)) +
+    geom_line(alpha = 0.8, linewidth = 0.8) +
+    geom_hline(yintercept = 0.95, linetype = "dashed", color = "black") +
+    facet_wrap(~n_label, ncol = 1) +
+    theme_minimal() +
+    labs(title = "Coverage probability (Nominal 95 percent)", y = "Coverage")
+
+p_len <- ggplot(wyniki, aes(x = p, y = Length, color = Method)) +
+    geom_line(alpha = 0.8, linewidth = 0.8) +
+    facet_wrap(~n_label, ncol = 1) +
+    theme_minimal() +
+    labs(title = "Mean confidence interval width", y = "Width")
+
+grid.arrange(p_cov, p_len, ncol = 2)
+```
+
+**Conclusions from the simulation:** 1. **Wald interval:** Performs poorly at boundary probabilities (near 0 and 1), especially for small $n=30$. Coverage often falls well below nominal 95%. Estimated variance becomes 0 at boundaries (interval length 0), yielding no coverage. 2. **Clopper-Pearson interval:** Conservative — coverage does not fall below $1-\alpha$ and tends to exceed 0.95, at the cost of slightly wider intervals. 3. **Wilson interval:** A strong compromise — coverage closer to 95% across $p$ with satisfactorily narrow width. For real data like our survey ($n=200$), Wilson or Clopper-Pearson is preferable.
+
+# Part III -- statistical hypothesis testing
+
+## Task 5 -- Testing selected hypotheses
+
+We use built-in `binom.test` and `prop.test` from `stats` for hypothesis testing at significance level $\alpha = 0.05$.
+
+```{r, dev='ragg_png', dpi=300}
+# 1. Probability that an employee in the company is a woman is 0.5.
+# H0: p = 0.5, H1: p != 0.5
+n_kobiety <- sum(dane$PLEC == "K", na.rm = TRUE)
+n_total <- sum(!is.na(dane$PLEC))
+test1 <- binom.test(n_kobiety, n_total, p = 0.5, alternative = "two.sided")
+
+# 2. Probability that an employee considers training adapted
+# to their needs in period 1 is greater than or equal to 0.7.
+# We typically test H0: p >= 0.7 vs H1: p < 0.7.
+c_1 <- sum(dane$CZY_ZADOW == 1, na.rm = TRUE)
+n_1 <- sum(!is.na(dane$CZY_ZADOW))
+test2 <- binom.test(c_1, n_1, p = 0.7, alternative = "less")
+
+# 3. Probability that a woman holds a management position
+# equals the probability that a man holds a management position.
+# H0: p_K = p_M, H1: p_K != p_M
+tab3 <- table(dane$PLEC, dane$CZY_KIER)
+test3 <- prop.test(tab3[, "Tak"], rowSums(tab3))
+
+# 4. Probability that a woman considers training adapted
+# in period 1 equals the probability among men.
+# H0: p_K = p_M, H1: p_K != p_M
+tab4 <- table(dane$PLEC, dane$CZY_ZADOW)
+test4 <- prop.test(tab4[, "1"], rowSums(tab4))
+
+# 5. Probability that a woman works in HR is >=
+# the probability that a man works in HR.
+# H0: p_K >= p_M, H1: p_K < p_M
+dane$CZY_HR <- ifelse(dane$DZIAL == "HR", 1, 0)
+tab5 <- table(dane$PLEC, dane$CZY_HR)
+test5 <- prop.test(tab5[, "1"], rowSums(tab5), alternative = "less")
+
+df_tests <- data.frame(
+    Test = c(
+        "1. Proportion of women = 0.5",
+        "2. Satisfaction >= 0.7",
+        "3. Management role and gender",
+        "4. Satisfaction and gender",
+        "5. HR employment and gender (<=)"
+    ),
+    `P-value` = c(test1$p.value, test2$p.value, test3$p.value, test4$p.value, test5$p.value),
+    Conclusion = c(
+        ifelse(test1$p.value < 0.05, "Reject H0", "Insufficient evidence to reject H0"),
+        ifelse(test2$p.value < 0.05, "Reject H0 (p<0.7)", "Insufficient evidence (p>=0.7)"),
+        ifelse(test3$p.value < 0.05, "Reject H0", "Insufficient evidence to reject H0"),
+        ifelse(test4$p.value < 0.05, "Reject H0", "Insufficient evidence to reject H0"),
+        ifelse(test5$p.value < 0.05, "Reject H0 (p_K<p_M)", "Insufficient evidence")
+    ),
+    check.names = FALSE
+)
+
+kable(df_tests,
+    digits = 4, caption = "Summary of hypothesis test results",
+    booktabs = TRUE
+) %>%
+    kable_styling(latex_options = c("striped", "hold_position"), full_width = FALSE)
+```
+
+**Conclusions from hypothesis testing:** The table presents all test results (*p-values* and basic conclusions at 5% significance). If *p-value* falls below $\alpha = 0.05$, there is sufficient evidence to reject $H_0$; otherwise we do not reject the proportion hypothesis. For test 2, we assess whether satisfaction satisfies $p \ge 0.7$. A high *p-value* indicates insufficient evidence that satisfaction is significantly lower (a low *p* would support lower satisfaction).
+
+## Task 6 -- Test power verification (Monte Carlo simulation)
+
+We run a Monte Carlo simulation comparing exact (`binom.test`) and asymptotic (`prop.test`) test power for $H_0: p = 0.9$ vs $H_1: p \neq 0.9$, for $n \in \{10, 100, 1000\}$ and true $p \in [0.7, 0.99]$, with $B = 5000$ replications per parameter combination.
+
+```{r fig.height=7, fig.width=10, dev='ragg_png', dpi=300}
+set.seed(42)
+p_true_vals <- seq(0.7, 0.99, by = 0.01)
+n_vals_pwr <- c(10, 100, 1000)
+B <- 5000 # number of Monte Carlo replications
+alpha_test <- 0.05
+
+power_res <- data.frame()
+
+for (n in n_vals_pwr) {
+    for (p_true in p_true_vals) {
+        x_sim <- rbinom(B, n, p_true)
+
+        # Exact test (Clopper-Pearson / binom.test)
+        pval_ex <- sapply(x_sim, function(x) {
+            binom.test(x, n, p = 0.9, alternative = "two.sided")$p.value
+        })
+
+        # Test asymptotyczny (prop.test)
+        pval_as <- sapply(x_sim, function(x) {
+            if (x == 0 || x == n) {
+                1.0 # edge cases – avoid numerical errors
+            } else {
+                prop.test(x, n, p = 0.9, alternative = "two.sided")$p.value
+            }
+        })
+
+        rej_exact <- mean(pval_ex < alpha_test)
+        rej_asymp <- mean(pval_as < alpha_test)
+
+        power_res <- rbind(power_res, data.frame(
+            n = n, p_true = p_true,
+            Power_Exact = rej_exact,
+            Power_Asymp = rej_asymp
+        ))
+    }
+}
+
+power_long <- power_res %>%
+    pivot_longer(cols = starts_with("Power"), names_to = "TestType", values_to = "Power") %>%
+    mutate(
+        n_label = factor(paste("n =", n), levels = c("n = 10", "n = 100", "n = 1000")),
+        TestType = ifelse(TestType == "Power_Exact",
+            "Exact (binom.test)",
+            "Asymptotic (prop.test)"
+        )
+    )
+
+ggplot(power_long, aes(x = p_true, y = Power, color = TestType)) +
+    geom_line(alpha = 0.8, linewidth = 1) +
+    geom_vline(xintercept = 0.9, linetype = "dashed", color = "darkred") +
+    geom_hline(yintercept = alpha_test, linetype = "dotted", color = "grey40") +
+    facet_wrap(~n_label, ncol = 3) +
+    scale_y_continuous(labels = label_percent(scale = 100), limits = c(0, 1)) +
+    theme_minimal(base_size = 11) +
+    labs(
+        title = "Power curves (Monte Carlo, B = 5000) — H₀: p = 0.9",
+        x = "True success probability (p)",
+        y = "Test power (P(reject H₀))",
+        color = "Method"
+    ) +
+    theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "bottom"
+    )
+```
+
+We also present a comparison table of the power of both tests for the alternative value $p = 0.8$ (a 10 p.p. deviation from $H_0$):
+
+```{r}
+tab_power <- power_res %>%
+    filter(abs(p_true - 0.80) < 0.005) %>%
+    mutate(
+        `Power – exact test` = paste0(round(Power_Exact * 100, 1), "%"),
+        `Power – asymptotic test` = paste0(round(Power_Asymp * 100, 1), "%"),
+        `Difference (asymp. − exact)` = paste0(round((Power_Asymp - Power_Exact) * 100, 1), " p.p.")
+    ) %>%
+    select(n, `Power – exact test`, `Power – asymptotic test`, `Difference (asymp. − exact)`)
+
+kable(tab_power,
+    caption = "Comparison of test power at p = 0.8 (Monte Carlo, B = 5000)",
+    booktabs = TRUE, linesep = "", escape = TRUE
+) %>%
+    kable_styling(latex_options = c("striped", "hold_position"), full_width = FALSE)
+```
+
+**Conclusions from the Monte Carlo simulation:**
+
+1.  **Effect of sample size on power:** Power increases with $n$. For $n = 10$ the power curve is very flat — even large deviations from $H_0$ (e.g. $p = 0.7$) are rarely detected. For $n = 100$ power rises as $p$ moves away from 0.9; for $n = 1000$ the curve is steep — the test detects deviations of 2--3 percentage points.
+
+2.  **Exact vs asymptotic test:** For small $n = 10$, the exact test is more conservative — empirical size under $H_0$ is below 5%, yielding slightly lower power than the asymptotic test. As $n$ grows, the difference vanishes as the normal approximation improves.
+
+3.  **Practical implications:** For survey data near $n \approx 200$ (as in our study), both tests have similar high power to detect 10 p.p. deviations from the tested value. Sample sizes $n \geq 100$ provide solid power for practically important differences.
