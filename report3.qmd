@@ -1,0 +1,485 @@
+---
+title: "Survey Data Analysis — Report 3"
+author: "Michał Marchwiak 276003, Weronika Mitulska 277475"
+date: today
+lang: en
+format:
+  pdf:
+    pdf-engine: xelatex
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    documentclass: article
+    geometry:
+      - margin=2.2cm
+    fontsize: 11pt
+    fig-width: 6.5
+    fig-height: 4.2
+    fig-align: center
+    include-in-header:
+      text: |
+        
+        \usepackage{booktabs}
+        \usepackage{float}
+        \usepackage{amsmath, amssymb}
+execute:
+  echo: false
+  warning: false
+  message: false
+  cache: false
+knitr:
+  opts_chunk:
+    comment: "#>"
+    collapse: true
+    dev: "ragg_png"
+    dpi: 300
+---
+
+```{r setup, include=FALSE}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(knitr)
+  library(kableExtra)
+})
+
+set.seed(2025)
+
+# Load data (CSV, separator ';', UTF-8 encoding)
+dane <- read.csv2("ankieta.csv", stringsAsFactors = FALSE, fileEncoding = "UTF-8")
+colnames(dane) <- c("DZIAL","STAZ","CZY_KIER","PYT_1","PYT_2","PYT_3","PLEC","WIEK")
+
+# Helper variables used in several tasks
+dane$CZY_KIER <- factor(dane$CZY_KIER, levels = c("Nie","Tak"))
+dane$PYT_2f   <- factor(dane$PYT_2, levels = c(-2,-1,1,2))
+dane$STAZf    <- factor(dane$STAZ,  levels = c(1,2,3),
+                        labels = c("<1 year","1-3 years",">3 years"))
+
+# "Training satisfaction" variables for two periods (task 3).
+# PYT_2 -> first period, PYT_3 -> second period; neither variable
+# takes value 0, so binarization relative to zero is unambiguous:
+# positive answer (1,2) = "Tak" (satisfied), negative (-2,-1) = "Nie".
+dane$CZY_ZADW   <- factor(ifelse(dane$PYT_2 > 0, "Tak", "Nie"), levels = c("Nie","Tak"))
+dane$CZY_ZADW_2 <- factor(ifelse(dane$PYT_3 > 0, "Tak", "Nie"), levels = c("Nie","Tak"))
+```
+
+# Introduction
+
+This report covers symmetry tests in square tables, Simpson's paradox,
+and log-linear models. Some calculations use data from the first task list
+(employee survey, $n = 200$, departments IT, HR, MK, PD); others use
+data given directly in the task statements.
+
+Survey variable coding conventions:
+
+- **CZY\_KIER** — whether the employee holds a management role (Nie/Tak);
+- **PYT\_2** — response to question 2 on ordinal scale $\{-2,-1,1,2\}$ (no zero in data);
+- **TENURE** — three categories: `<1 year`, `1–3 years`, `>3 years`;
+- **CZY\_ZADW**, **CZY\_ZADW\_2** — training satisfaction in periods 1 and 2, binarized from `PYT_2`/`PYT_3` (positive $\Rightarrow$ "Tak", negative $\Rightarrow$ "Nie").
+
+All computations were performed in R; the random seed was set to `set.seed(2025)`.
+
+---
+
+# Part I
+
+## Task 1 — Conditional symmetry test for a $2\times2$ table
+
+For a $2\times2$ table, symmetry is $H_0:\ p_{12} = p_{21}$. In the **conditional test** we condition on $m = n_{12} + n_{21}$. Under $H_0$, discordant counts follow $\mathrm{Bin}(m,\tfrac12)$, so
+$$
+n_{12} \mid m \ \sim\ \mathrm{Bin}\!\left(m,\tfrac12\right).
+$$
+The two-sided p-value doubles the smaller binomial tail:
+$$
+p = \min\!\Bigl\{1,\ 2\!\!\sum_{j=0}^{\min(n_{12},n_{21})}\binom{m}{j}\Bigl(\tfrac12\Bigr)^{m}\Bigr\}.
+$$
+
+```{r zad1, echo=TRUE}
+# Conditional (exact) symmetry test for a 2x2 table.
+# Returns two-sided p-value based on Bin(m, 1/2) distribution.
+p_warunkowy <- function(n12, n21) {
+  m <- n12 + n21
+  if (m == 0) return(1)
+  k <- min(n12, n21)
+  min(1, 2 * pbinom(k, size = m, prob = 0.5))
+}
+```
+
+This test is an exact (conditional) counterpart of McNemar's test; it does
+not use a $\chi^2$ approximation, so it remains valid for small counts.
+
+## Task 2 — Efficacy of two analgesic drugs
+
+Data (drug reaction after one hour; same patient for both drugs):
+
+```{r zad2-tab}
+M <- matrix(c(1,5,2,4), nrow = 2, byrow = TRUE,
+            dimnames = list("Drug A" = c("Negative","Positive"),
+                            "Drug B" = c("Negative","Positive")))
+M_marg <- addmargins(M)
+rownames(M_marg)[3] <- colnames(M_marg)[3] <- "Total"
+kable(M_marg, caption = "Response to drug A (rows) vs drug B (columns).,
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+Off-diagonal: $n_{12}=5$, $n_{21}=2$. $H_0$: equal efficacy.
+
+```{r zad2-test}
+mcc <- mcnemar.test(M, correct = TRUE)
+pw  <- p_warunkowy(5, 2)
+tab_z2 <- data.frame(
+  Test         = c("McNemar (with continuity correction)", "conditional (task 1)"),
+  Statistic   = c(sprintf("%.4f", unname(mcc$statistic)), "---"),
+  `p-value`  = c(signif(mcc$p.value, 4), signif(pw, 4)),
+  check.names  = FALSE
+)
+kable(tab_z2, caption = "Testing the hypothesis of equal drug efficacy.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Results.** McNemar: $\chi^2 \approx 0.571$ ($p \approx 0.450$). Conditional: $p \approx 0.453$. Both well above $0.05$.
+
+**Conclusion.** Insufficient evidence to reject $H_0$; small sample ($m=7$) implies low power.
+
+## Task 3 — Symmetry of training satisfaction across two periods
+
+Using `CZY_ZADW` and `CZY_ZADW_2` we build a $2\times2$ table and test symmetry.
+
+```{r zad3}
+t3 <- table(`Period 1 (CZY_ZADW)` = dane$CZY_ZADW,
+            `Period 2 (CZY_ZADW_2)` = dane$CZY_ZADW_2)
+t3_marg <- addmargins(t3)
+rownames(t3_marg)[3] <- colnames(t3_marg)[3] <- "Total"
+kable(t3_marg,
+      caption = "Training satisfaction: period 1 (rows) vs period 2 (columns).,
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+
+mcc3 <- mcnemar.test(t3, correct = TRUE)
+n12 <- t3["Nie","Tak"]; n21 <- t3["Tak","Nie"]
+pw3 <- p_warunkowy(n12, n21)
+tab_z3 <- data.frame(
+  Test        = c("McNemar (with continuity correction)", "conditional (task 1)"),
+  Statistic  = c(sprintf("%.4f", unname(mcc3$statistic)), "---"),
+  `p-value` = c(signif(mcc3$p.value, 4), signif(pw3, 4)),
+  check.names = FALSE
+)
+kable(tab_z3, caption = "Symmetry test for training satisfaction.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+```{r zad3-plot, fig.cap="Number of employees changing satisfaction status between periods. Off-diagonal cells (Nie$\\to$Tak and Tak$\\to$Nie) determine the symmetry test."}
+df3 <- as.data.frame(t3)
+colnames(df3) <- c("Period1","Period2","n")
+ggplot(df3, aes(Period1, Period2, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 5) +
+  scale_fill_gradient(low = "grey90", high = "steelblue") +
+  labs(x = "Period 1 (CZY_ZADW)", y = "Period 2 (CZY_ZADW_2)", fill = "Count") +
+  theme_minimal(base_size = 11)
+```
+
+**Results.** $n_{12}=20$ (Nie→Tak), $n_{21}=8$ (Tak→Nie). McNemar $p\approx0.038$; conditional $p\approx0.036$. Both below $\alpha=0.05$.
+
+**Conclusion.** **We reject** the symmetry hypothesis. This means that the satisfaction
+distribution across the two periods **does not** match a symmetry model — therefore
+**training satisfaction changed**. The direction of flows
+(20 transitions to "Tak" vs 8 to "Nie") indicates an **increase** in the proportion
+of satisfied employees in the second period.
+
+\newpage
+
+## Task 4 — Response symmetry ($5\times5$ table, Bowker test)
+
+Task Table 2 data — same question from $n=200$ employees in periods 1 (rows) and 2 (columns):
+
+```{r zad4-tab}
+T2 <- matrix(c(10, 2, 1, 1, 0,
+                0,15, 1, 1, 0,
+                1, 1,32, 6, 0,
+                0, 0, 1,96, 3,
+                1, 1, 0, 1,26),
+             nrow = 5, byrow = TRUE,
+             dimnames = list("Period 1" = c("-2","-1","0","1","2"),
+                             "Period 2" = c("-2","-1","0","1","2")))
+kable(T2, caption = "Responses in period 1 (rows) vs period 2 (columns).,
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+For $k\times k$ tables, **Bowker's test** generalizes McNemar:
+$$
+\chi^2_B = \sum_{i<j} \frac{(n_{ij}-n_{ji})^2}{n_{ij}+n_{ji}},
+$$
+with df equal to the number of pairs $(i,j),\ i<j$.
+
+```{r zad4-test}
+# Bowker computed manually: pairs with n_ij + n_ji = 0 are skipped (0/0),
+# which reduces the effective degrees of freedom.
+k <- nrow(T2); bow <- 0; df_eff <- 0
+for (i in 1:(k-1)) for (j in (i+1):k) {
+  s <- T2[i,j] + T2[j,i]
+  if (s > 0) { bow <- bow + (T2[i,j]-T2[j,i])^2 / s; df_eff <- df_eff + 1 }
+}
+df_nom <- k*(k-1)/2
+tab_z4 <- data.frame(
+  Variant      = c("nominal df = 10", "effective df = 9 (after removing 0/0 pairs)"),
+  Statistic   = round(bow, 4),
+  df           = c(df_nom, df_eff),
+  `p-value`  = c(signif(1-pchisq(bow, df_nom), 4), signif(1-pchisq(bow, df_eff), 4)),
+  check.names  = FALSE
+)
+kable(tab_z4, caption = "Bowker symmetry test for a 5×5 table.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Zero-count problem.** Category pair $(0,2)$, i.e. cells $(3,5)$ i $(5,3)$,
+ma $n_{35}+n_{53} = 0+0 = 0$, leading to division $0/0$ (funkcja
+`mcnemar.test` then returns `NaN`). This pair contributes zero; omit and reduce df to $9$ (discussed in additional task 1\*).
+
+**Results.** $\chi^2_B \approx 10.57$; $p\approx0.306$ (df=9) or $0.392$ (df=10). Both $p>0.05$.
+
+**Conclusion.** No evidence against symmetry; **no evidence of change** in company approach rating.
+
+\newpage
+
+# Part II
+
+## Task 5 — Simpson's paradox
+
+We compare treatments A (new) and B (old) overall and by comorbidity.
+
+```{r zad5}
+skutecz <- function(popr, brak) popr / (popr + brak)
+orf <- function(a, b, c, d) (a*d)/(b*c)   # odds ratio (improvement A:B)
+
+tab5 <- data.frame(
+  Group = c("Overall group", "With comorbidities", "Without comorbidities"),
+  `Improvement A` = c("117/221", "17/118", "100/103"),
+  `Improvement B` = c("177/221", "2/38",   "175/183"),
+  `% impr. A` = round(100*c(skutecz(117,104), skutecz(17,101), skutecz(100,3)), 1),
+  `% impr. B` = round(100*c(skutecz(177,44),  skutecz(2,36),   skutecz(175,8)), 1),
+  `OR (A:B)`  = round(c(orf(117,104,177,44), orf(17,101,2,36), orf(100,3,175,8)), 2),
+  check.names = FALSE
+)
+kable(tab5, caption = "Patients with improvement, improvement rate, and odds ratio for treatment A vs B.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+```{r zad5-plot, fig.cap="Improvement rate w metodach A i B: for the overall group method B appears better, ale w obu podgrupach lepsza jest metoda A — direction reversal indicates Simpson's paradox."}
+dfp <- tab5 |>
+  dplyr::select(Group, `% impr. A`, `% impr. B`) |>
+  tidyr::pivot_longer(-Group, names_to = "Method", values_to = "proc")
+dfp$Method <- ifelse(dfp$Method == "% impr. A", "Treatment A", "Treatment B")
+dfp$Group <- factor(dfp$Group,
+                    levels = c("Overall group","With comorbidities","Without comorbidities"))
+ggplot(dfp, aes(Group, proc, fill = Method)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_text(aes(label = paste0(proc,"%")),
+            position = position_dodge(width = 0.7), vjust = -0.3, size = 3.4) +
+  scale_fill_manual(values = c("Treatment A" = "steelblue", "Treatment B" = "firebrick")) +
+  labs(x = NULL, y = "Improvement rate [%]") +
+  ylim(0, 105) +
+  theme_minimal(base_size = 11)
+```
+
+**Results.** Overall B looks better (80.1% vs 52.9%); **in both subgroups A is better**.
+
+**Conclusion.** **Yes, Simpson's paradox occurs** — the direction of association
+reverses after accounting for a confounding variable (comorbidities).
+The cause is uneven risk distribution: treatment A was used more often
+for sicker patients (118 of 221 treated with A had comorbidities
+vs 38 of 221 treated with B), which worsened its aggregated
+outcome. The proper effectiveness assessment is subgroup
+analysis, which indicates an advantage for treatment A.
+
+## Task 6 — Interpretation of log-linear models
+
+Variables **1=CZY\_KIER**, **2=PYT\_2**, **3=TENURE**. $\pi_{ijk}$ is cell probability; brackets show retained interactions.
+
+```{r zad6-tab}
+z6 <- data.frame(
+  Model = c("$[1\\ 3]$", "$[13]$", "$[1\\ 2\\ 3]$",
+            "$[12\\ 3]$", "$[12\\ 13]$", "$[1\\ 23]$"),
+  Postac = c(
+    "$\\pi_{i\\cdot k}=\\pi_{i\\cdot\\cdot}\\,\\pi_{\\cdot\\cdot k}$",
+    "$\\pi_{i\\cdot k}$ dowolne",
+    "$\\pi_{i\\cdot\\cdot}\\,\\pi_{\\cdot j\\cdot}\\,\\pi_{\\cdot\\cdot k}$",
+    "$\\pi_{ij\\cdot}\\,\\pi_{\\cdot\\cdot k}$",
+    "$\\pi_{ij\\cdot}\\,\\pi_{i\\cdot k}/\\pi_{i\\cdot\\cdot}$",
+    "$\\pi_{i\\cdot\\cdot}\\,\\pi_{\\cdot jk}$"),
+  Interpretation = c(
+    "\\textbf{Independence of CZY\\_KIER and TENURE} (model for pair 1--3, omitting variable 2). Position does not depend on tenure.",
+    "\\textbf{Saturated model for pair 1--3} --- allows any association between CZY\\_KIER and TENURE.",
+    "\\textbf{Mutual (complete) independence} of all three variables.",
+    "\\textbf{TENURE independent of pair (CZY\\_KIER, PYT\\_2)}; variables 1 and 2 may be associated.",
+    "\\textbf{PYT\\_2 and TENURE conditionally independent given CZY\\_KIER} (variable 1 is the common core).",
+    "\\textbf{CZY\\_KIER independent of pair (PYT\\_2, TENURE)}; variables 2 and 3 may be associated."),
+  check.names = FALSE
+)
+kbl(z6, format = "latex", booktabs = TRUE, escape = FALSE,
+    col.names = c("Model", "Form $\\pi_{ijk}$", "Interpretation"),
+    caption = "Interpretation modeli log-liniowych (1 = CZY\\_KIER, 2 = PYT\\_2, 3 = TENURE).") |>
+  kable_styling(latex_options = c("HOLD_position"), full_width = FALSE) |>
+  column_spec(1, width = "1.5cm") |>
+  column_spec(2, width = "3cm") |>
+  column_spec(3, width = "9.5cm")
+```
+
+**Comment.** Models $[1\ 3]$ and $[13]$ concern a two-way table
+(zmienne 1 i 3): first assumes independence, second is saturated.
+Three-way models range from most restrictive
+(complete independence $[1\ 2\ 3]$), through one variable independent of a pair ($[12\ 3]$, $[1\ 23]$), to conditional independence
+($[12\ 13]$, where a common variable links both others but they are not associated with each other).
+
+## Task 7 — Probability estimation (models $[123]$ and $[12\ 23]$)
+
+```{r zad7}
+tab3w <- table(CZY_KIER = dane$CZY_KIER, PYT_2 = dane$PYT_2f, STAZ = dane$STAZf)
+
+# Saturated model [123] = empirical frequencies
+P_sat <- tab3w / sum(tab3w)
+p1_sat <- sum(P_sat["Tak","2",]) / sum(P_sat["Tak",,])    # P(PYT_2=2 | kier)
+p2_sat <- sum(P_sat[,, "<1 year"]["Tak",]) / sum(P_sat[,, "<1 year"]) # P(manager | tenure<1)
+p3_sat <- sum(P_sat[,, ">3 years"]["Nie",]) / sum(P_sat[,, ">3 years"]) # P(non-manager | tenure>3)
+
+# Model [12 23]: 1 and 3 conditionally independent given 2
+m1223 <- loglin(tab3w, list(c(1,2), c(2,3)), fit = TRUE, print = FALSE)
+Pf <- m1223$fit / sum(m1223$fit)
+p1_m <- sum(Pf["Tak","2",]) / sum(Pf["Tak",,])
+p2_m <- sum(Pf[,, "<1 year"]["Tak",]) / sum(Pf[,, "<1 year"])
+p3_m <- sum(Pf[,, ">3 years"]["Nie",]) / sum(Pf[,, ">3 years"])
+
+tab7 <- data.frame(
+  Probability = c(
+    "$P(\\text{PYT\\_2}{=}2 \\mid \\text{manager})$",
+    "$P(\\text{manager} \\mid \\text{tenure} < 1\\text{ rok})$",
+    "$P(\\text{non-manager} \\mid \\text{tenure} > 3\\text{ lata})$"),
+  `Model [123]`    = round(c(p1_sat, p2_sat, p3_sat), 4),
+  `Model [12 23]`  = round(c(p1_m, p2_m, p3_m), 4),
+  check.names = FALSE
+)
+kbl(tab7, format = "latex", booktabs = TRUE, escape = FALSE,
+    caption = "Probability estimates in the saturated and [12 23] models.") |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+****Results (saturated model $[123]$ = empirical frequencies).****
+
+- $P(\text{PYT\_2}=2 \mid \text{manager}) \approx 0.481$ — nearly half of managers strongly satisfied;
+- $P(\text{manager} \mid \text{tenure}<1\text{ year}) \approx 0.024$;
+- $P(\text{non-manager} \mid \text{tenure}>3\text{ years}) \approx 0.526$.
+
+**Results (model $[12\ 23]$).** First probability remains the same ($\approx 0{,}481$), because $[12\ 23]$ preserves full pair dependence (CZY\_KIER, PYT\_2). The other two change because CZY\_KIER–TENURE dependence is filtered through PYT\_2 (conditional independence
+1 i 3 przy ustalonym 2): $P(\text{kier}\mid\text{tenure}<1) \approx 0{,}128$
+oraz $P(\text{nie kier}\mid\text{tenure}>3) \approx 0{,}778$. The model smooths extreme estimates by borrowing information across PYT\_2 layers.
+
+## Task 8 — Testing independence hypotheses (log-linear models)
+
+Each hypothesis: log-linear model vs saturated model; $G^2$ deviance is $\chi^2$ under $H_0$.
+
+```{r zad8}
+df8 <- as.data.frame(tab3w)
+m_mut  <- glm(Freq ~ CZY_KIER + PYT_2 + STAZ,            family = poisson, data = df8)  # [1 2 3]
+m_jnt  <- glm(Freq ~ CZY_KIER*STAZ + PYT_2,              family = poisson, data = df8)  # [2 13]
+m_cnd  <- glm(Freq ~ CZY_KIER*STAZ + PYT_2*STAZ,         family = poisson, data = df8)  # [13 23]
+
+g2 <- function(m) c(round(m$deviance,3), m$df.residual, signif(1-pchisq(m$deviance,m$df.residual),4))
+tab8 <- data.frame(
+  Hypothesis = c("CZY_KIER, PYT_2, TENURE mutually independent",
+               "PYT_2 independent of the pair (CZY_KIER, TENURE)",
+               "PYT_2 independent of CZY_KIER given TENURE"),
+  Model    = c("[1 2 3]", "[2 13]", "[13 23]"),
+  `G²`     = c(g2(m_mut)[1], g2(m_jnt)[1], g2(m_cnd)[1]),
+  df       = c(g2(m_mut)[2], g2(m_jnt)[2], g2(m_cnd)[2]),
+  `p-value` = c(g2(m_mut)[3], g2(m_jnt)[3], g2(m_cnd)[3]),
+  check.names = FALSE
+)
+kable(tab8, caption = "Likelihood-ratio tests for independence hypotheses.",
+      booktabs = TRUE) |>
+  kable_styling(latex_options = c("HOLD_position"))
+```
+
+**Results and conclusions** (significance level $\alpha = 0{,}05$):
+
+1. **Mutual independence** $[1\ 2\ 3]$: reject $H_0$ ($p\approx0.0006$).
+2. **PYT\_2 independent of (CZY\_KIER, TENURE)** $[2\ 13]$: insufficient evidence to reject ($p\approx0.081$).
+3. **PYT\_2 independent of CZY\_KIER given TENURE** $[13\ 23]$: insufficient evidence to reject ($p\approx0.845$).
+
+```{r zad8-plot, fig.height=5, fig.cap="PYT\\_2 response distribution in strata by tenure (columns) and management role (rows). Each panel has its own y-axis scale (managers are few)."}
+df8plot <- as.data.frame(tab3w)
+df8plot$CZY_KIER <- factor(df8plot$CZY_KIER, levels = c("Nie","Tak"),
+                           labels = c("Non-manager", "Manager"))
+ggplot(df8plot, aes(x = PYT_2, y = Freq, fill = PYT_2)) +
+  geom_col(show.legend = FALSE, width = 0.75) +
+  geom_text(aes(label = Freq), vjust = -0.3, size = 2.7) +
+  facet_grid(CZY_KIER ~ STAZ, scales = "free_y") +
+  scale_fill_brewer(palette = "RdYlBu") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  labs(x = "PYT_2 (response)", y = "Number of observations") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold"))
+```
+
+**Comment on the figure.** Plot shows response distribution PYT\_2 in six strata (3 tenure categories $\times$ 2 position levels). Distribution shape
+PYT\_2 is similar across strata (positive responses dominate), consistent with not rejecting hypotheses 2 and 3. Strong dependence is also visible CZY\_KIER–TENURE: managers appear almost only with longer tenure (panel „Manager" for tenure `<1 year` is nearly empty),
+explaining rejection of mutual independence.
+
+\newpage
+
+# Additional tasks
+
+## Task 1* — Exact symmetry test for a table with zeros
+
+Bowker hits $0/0$ for pair $(0,2)$; use **exact conditional symmetry test**.
+
+**Idea.** Under symmetry, condition on pair sums; binomial allocation across pairs.
+
+**Determining the critical level.** P-value is the probability under $H_0$ that the statistic is at least as extreme as observed. It is found by **summing over all configurations**
+$\{n_{ij}': n_{ij}'+n_{ji}'=m_{ij}\}$ their joint binomial probability (product over pairs), including only layouts where statistic $\ge$ observed value. Pairs with $m_{ij}=0$ are **omitted** (they add no randomness), which naturally removes the $0/0$.
+Below we estimate this p-value by Monte Carlo.
+
+```{r zad1gw}
+exact_sym_mc <- function(T2, B = 20000) {
+  k <- nrow(T2)
+  pairs <- which(upper.tri(T2), arr.ind = TRUE)
+  m  <- T2[cbind(pairs[,1], pairs[,2])] + T2[cbind(pairs[,2], pairs[,1])]
+  nij <- T2[cbind(pairs[,1], pairs[,2])]
+  use <- m > 0
+  Tobs <- sum((2*nij[use] - m[use])^2 / m[use])   # = suma (n_ij - n_ji)^2/(n_ij+n_ji)
+  cnt <- 0
+  for (b in 1:B) {
+    sim <- rbinom(sum(use), m[use], 0.5)
+    Tsim <- sum((2*sim - m[use])^2 / m[use])
+    if (Tsim >= Tobs - 1e-9) cnt <- cnt + 1
+  }
+  list(T = Tobs, p = (cnt + 1)/(B + 1), df_eff = sum(use))
+}
+set.seed(2025)
+es <- exact_sym_mc(T2)
+```
+
+Exact test ($B=20000$): $T \approx `r round(es$T,3)`$, p $\approx `r signif(es$p,3)`$ — **insufficient evidence to reject symmetry**.
+
+---
+
+# Summary
+
+- **Zad. 1–2.** Warunkowy symmetry test dla tablicy $2\times2$ is the exact McNemar counterpart ($n_{12}\mid m\sim\mathrm{Bin}(m,\tfrac12)$).
+  For analgesics ($p\approx0{,}45$) no evidence of different efficacy.
+- **Zad. 3.** Training satisfaction **changed** between periods
+  ($p\approx0{,}036$) — significantly more people became satisfied.
+- **Zad. 4.** Company approach rating **did not change** — test Bowkera
+  ($p\approx0{,}31$) does not reject symmetry (zero problem addressed in sat. 1\*).
+- **Zad. 5.** Treatment data show **Simpson's paradox**: metoda B
+  wins in aggregate but A is better in both subgroups.
+- **Zad. 6–7.** Six log-linear models interpreted; probabilities estimated under saturated and $[12\ 23]$.
+- **Zad. 8.** Variables CZY\_KIER, PYT\_2, TENURE **are not** mutually independent;
+  PYT\_2 is (conditionally) independent of CZY\_KIER given tenure ($p\approx0{,}85$).
